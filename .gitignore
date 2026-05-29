@@ -32,6 +32,11 @@ desktop.ini
 # IDE
 .idea/
 
+# Rosti deploy — obsahuje produkční secrets a stav stacku, NEpatří do gitu
+docker-compose.rosti.yml
+.rostistate
+/data/
+
 
 # XSD schémata MFČR jsou nyní commitnutá v api/xsd/ (public schémata, ~250 KB).
 # Legacy: storage/xsd/ se už nepoužívá — zde držíme jen mpdf-temp/ exempci.
