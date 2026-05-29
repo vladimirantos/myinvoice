@@ -1465,7 +1465,7 @@ paths:
         - **rolling_12m** — plovoucí 12měsíční obrat per měna (+ 12m předtím
           pro YoY); relevantní pro DPH limit (2 mil. Kč),
         - **revenue_last_30d** — live obrat za posledních 30 dní per měna,
-        - **revenue_forecast** — predikce ročního obratu (growth-adjusted seasonality),
+        - **revenue_forecast** — predikce ročního obratu (medián tří projekcí: run-rate / krátkodobý růst / trend, vč. rozpětí),
         - **cashflow_ytd** — kumulativní inkasované platby letošek vs loni,
         - **cashflow_forecast** — co přiteče z neuhrazených v 30/60/90 dnech,
         - **due_buckets** — splatné dnes / tento týden / tento měsíc,
@@ -2627,6 +2627,49 @@ paths:
     delete:
       tags: [Codebooks]
       summary: Smaže (nebo archivuje pokud má reference) kategorii
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      responses:
+        '200': { description: Deleted/archived }
+
+  /api/v1/revenue-categories:
+    get:
+      tags: [Codebooks]
+      summary: Seznam kategorií tržeb
+      parameters: [{ $ref: '#/components/parameters/SupplierIdHeader' }]
+      responses:
+        '200': { description: List }
+    post:
+      tags: [Codebooks]
+      summary: Vytvoří kategorii tržby (admin)
+      parameters: [{ $ref: '#/components/parameters/SupplierIdHeader' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, label]
+              properties:
+                code: { type: string, maxLength: 20, pattern: '^[a-z0-9_-]+$' }
+                label: { type: string, maxLength: 100 }
+                display_order: { type: integer }
+      responses:
+        '201': { description: Created }
+
+  /api/v1/revenue-categories/{id}:
+    put:
+      tags: [Codebooks]
+      summary: Update kategorie tržby
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      responses:
+        '200': { description: OK }
+    delete:
+      tags: [Codebooks]
+      summary: Smaže (nebo archivuje pokud má reference) kategorii tržby
       parameters:
         - { in: path, name: id, required: true, schema: { type: integer } }
         - $ref: '#/components/parameters/SupplierIdHeader'
@@ -3885,21 +3928,26 @@ components:
         revenue_forecast:
           type: array
           description: |
-            Forecast ročního obratu — growth-adjusted seasonality.
+            Forecast ročního obratu — medián tří nezávislých projekcí (odolný vůči odlehlému signálu).
 
-            **Vzorec:** `forecast = YTD_letos + (prev_year_remainder × growth_ratio)`,
-            kde `growth_ratio = YTD_letos / YTD_loni_do_stejného_dne` (capnut na [0.3, 3.0]).
-            Tj. predikce zbytku roku z loňské sezonality, škálovaná aktuálním YoY růstem.
+            **Postup:** medián ze tří signálů —
+            (1) run-rate `ytd / uplynulé_dny × dní_v_roce`,
+            (2) sezonalita × krátkodobý růst `ytd + prev_year_remainder × growth_short`,
+            (3) sezonalita × dlouhodobý trend `ytd + prev_year_remainder × growth_trend`.
+            `forecast` je medián, `forecast_low`/`forecast_high` rozpětí (min/max projekcí).
+            Bez loňských dat (`prev_year_full = 0`) se použije pouze run-rate.
           items:
             type: object
             properties:
               currency: { type: string }
               ytd: { type: number, description: "Obrat letos Jan 1 – dnes" }
-              prev_year_ytd: { type: number, description: "Obrat loni Jan 1 – stejný den" }
               prev_year_remainder: { type: number, description: "Obrat loni od dneška do konce roku (sezonalita)" }
-              growth_ratio: { type: number, description: "YTD_letos / YTD_loni, cap [0.3, 3.0]" }
-              forecast: { type: number, description: "Predikovaný celoroční obrat" }
               prev_year_full: { type: number, description: "Celý loňský rok pro srovnání" }
+              growth_short: { type: number, description: "Krátkodobý růst: rolling 12m / předch. 12m, cap [0.5, 2.5]" }
+              growth_trend: { type: number, description: "Dlouhodobý trend: CAGR z posledních ≤5 let, cap [0.8, 1.8]" }
+              forecast: { type: number, description: "Medián tří projekcí — predikovaný celoroční obrat" }
+              forecast_low: { type: number, description: "Nejnižší ze tří projekcí (spodní hranice rozpětí)" }
+              forecast_high: { type: number, description: "Nejvyšší ze tří projekcí (horní hranice rozpětí)" }
         cashflow_ytd:
           type: array
           description: "Měsíční cash-flow (skutečné platby `paid_at`) letošek + minulý rok per měna. Doplňuje obrat o reálné inkaso."
@@ -4189,6 +4237,7 @@ components:
           example: 21
           description: "Snapshot procentní hodnoty DPH v okamžiku přidání položky (drží se i po případné změně sazby v číselníku)"
         vat_code: { type: string, nullable: true, example: "STD", description: "Kód sazby ze snapshot-u (STD / RED1 / RED2 / ZERO / FREE)" }
+        vat_classification_code: { type: string, nullable: true, example: "3", description: "Kód klasifikace plnění pro DPH přiznání / Kontrolní hlášení (default podle sazby + reverse charge + země klienta). U neplátce DPH bez významu." }
         total_without_vat: { type: number, format: float }
         total_vat: { type: number, format: float }
         total_with_vat: { type: number, format: float }
@@ -4210,6 +4259,7 @@ components:
         unit_price_without_vat: { type: number, format: float, description: "Jednotková cena BEZ DPH. Může být záporná pro slevový řádek, ale ne současně se záporným množstvím." }
         vat_rate_id: { type: integer, description: "FK do /codebooks/vat-rates (kontextově k supplierovi)" }
         order_index: { type: integer, description: "Pořadí v rámci faktury. Default = pozice v poli." }
+        vat_classification_code: { type: string, nullable: true, description: "Volitelný kód klasifikace plnění (DPH přiznání / KH). Když nevyplněno, server dopočítá default podle sazby + reverse charge + země klienta." }
 
     RecurringTemplate:
       type: object

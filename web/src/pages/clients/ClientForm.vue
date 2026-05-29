@@ -5,7 +5,9 @@ import { useI18n } from 'vue-i18n'
 import { clientsApi, type ClientPayload, type Client } from '@/api/clients'
 import { codebooksApi, type Country, type Currency } from '@/api/codebooks'
 import { expenseCategoriesApi, type ExpenseCategory } from '@/api/expenseCategories'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { useToast } from '@/composables/useToast'
+import { useSupplierStore } from '@/stores/supplier'
 
 /**
  * V `embedded` módu komponenta nečte route, neredirektuje a vrací výsledek
@@ -22,6 +24,7 @@ const emit = defineEmits<{
 
 const { t, locale } = useI18n()
 const toast = useToast()
+const supplierStore = useSupplierStore()
 
 const route = useRoute()
 const router = useRouter()
@@ -30,6 +33,56 @@ const isEdit = computed(() =>
   !props.embedded && route.params.id !== undefined && route.params.id !== 'new'
 )
 const clientId = computed(() => (isEdit.value ? Number(route.params.id) : null))
+
+// Splatnost — UI preset selector. 'inherit' = dědit supplier default; ostatní hodnoty
+// zapíšou do form pevnou dvojici (payment_due_default, payment_due_unit). 'custom'
+// odhalí číselný input pro libovolný počet dnů (zachová dosavadní hodnotu, nebo 30 default).
+type ClientDuePreset = 'inherit' | '7' | '14' | 'month' | 'custom'
+// 'custom' musí být „sticky" i když hodnota odpovídá presetu (7/14) — jinak by getter
+// spadl zpět na preset a číselný input by se nikdy neukázal.
+const dueCustom = ref(false)
+const clientDuePreset = computed<ClientDuePreset>({
+  get() {
+    if (dueCustom.value) return 'custom'
+    const d = form.value.payment_due_default
+    const u = form.value.payment_due_unit
+    if (d == null && u == null) return 'inherit'
+    if (u === 'month' && d === 1) return 'month'
+    if ((u === 'days' || u == null) && d === 7) return '7'
+    if ((u === 'days' || u == null) && d === 14) return '14'
+    return 'custom'
+  },
+  set(v: ClientDuePreset) {
+    dueCustom.value = (v === 'custom')
+    if (v === 'inherit') {
+      form.value.payment_due_default = null
+      form.value.payment_due_unit = null
+    } else if (v === '7') {
+      form.value.payment_due_default = 7
+      form.value.payment_due_unit = 'days'
+    } else if (v === '14') {
+      form.value.payment_due_default = 14
+      form.value.payment_due_unit = 'days'
+    } else if (v === 'month') {
+      form.value.payment_due_default = 1
+      form.value.payment_due_unit = 'month'
+    } else {
+      if (form.value.payment_due_default == null) form.value.payment_due_default = 30
+      form.value.payment_due_unit = 'days'
+    }
+  },
+})
+
+// Lidsky čitelná hodnota supplier defaultu pro „Použít výchozí (…)" option.
+const supplierDueLabel = computed(() => {
+  const sup = supplierStore.currentSupplier
+  if (!sup) return t('client.payment_due_inherit_fallback')
+  const d = sup.default_payment_due_days
+  const u = sup.default_payment_due_unit
+  if (u === 'month' && d === 1) return t('client.payment_due_preset_month').toLowerCase()
+  if (u === 'days') return `${d} ${t('client.payment_due_custom_days_suffix')}`
+  return `${d}× ${t('client.payment_due_preset_month').toLowerCase()}`
+})
 
 const form = ref<ClientPayload>({
   company_name: '',
@@ -48,10 +101,12 @@ const form = ref<ClientPayload>({
   is_customer: route.query.role !== 'vendor',
   is_vendor: route.query.role === 'vendor',
   auto_send_reminders: true,
-  payment_due_default: 7,
+  payment_due_default: null,
+  payment_due_unit: null,
   hourly_rate: 0,
   note: null,
   default_expense_category_id: null,
+  default_revenue_category_id: null,
   invoice_number_format: null,
   proforma_number_format: null,
   credit_note_number_format: null,
@@ -66,6 +121,7 @@ const lockVendor   = ref(false)  // true pokud má přijaté faktury
 const countries = ref<Country[]>([])
 const currencies = ref<Currency[]>([])
 const expenseCategories = ref<ExpenseCategory[]>([])
+const revenueCategories = ref<RevenueCategory[]>([])
 const submitting = ref(false)
 const error = ref('')
 const errors = ref<Record<string, string[]>>({})
@@ -76,14 +132,16 @@ const duplicateIc = ref<{ id: number; name: string } | null>(null)
 const duplicateDic = ref<{ id: number; name: string } | null>(null)
 
 onMounted(async () => {
-  const [c, cur, ec] = await Promise.all([
+  const [c, cur, ec, rc] = await Promise.all([
     codebooksApi.countries(),
     codebooksApi.currencies(),
     expenseCategoriesApi.list(false).catch(() => [] as ExpenseCategory[]),  // jen aktivní
+    revenueCategoriesApi.list(false).catch(() => [] as RevenueCategory[]),  // jen aktivní
   ])
   countries.value = c
   currencies.value = cur
   expenseCategories.value = ec
+  revenueCategories.value = rc
   if (form.value.currency_default_id === 0) {
     const def = cur.find(x => x.is_default && x.code === 'CZK') || cur[0]
     if (def) form.value.currency_default_id = def.id
@@ -118,9 +176,11 @@ function sanitize(c: Client): Partial<ClientPayload> {
     is_vendor:   c.is_vendor   === true,
     auto_send_reminders: c.auto_send_reminders ?? true,
     payment_due_default: c.payment_due_default ?? null,
+    payment_due_unit: c.payment_due_unit ?? null,
     hourly_rate: c.hourly_rate ?? 0,
     note: c.note ?? null,
     default_expense_category_id: c.default_expense_category_id ?? null,
+    default_revenue_category_id: c.default_revenue_category_id ?? null,
     invoice_number_format: c.invoice_number_format ?? null,
     proforma_number_format: c.proforma_number_format ?? null,
     credit_note_number_format: c.credit_note_number_format ?? null,
@@ -214,6 +274,10 @@ async function submit() {
       if (backfilled > 0) {
         toast.success(t('client.default_expense_category_backfilled', { count: backfilled }))
       }
+      const revBackfilled = updated.revenue_category_backfilled ?? 0
+      if (revBackfilled > 0) {
+        toast.success(t('client.default_revenue_category_backfilled', { count: revBackfilled }))
+      }
       if (props.embedded) { emit('created', updated); return }
       router.push(`/clients/${clientId.value}`)
     } else {
@@ -241,7 +305,7 @@ async function submit() {
       <RouterLink to="/clients" class="text-sm text-neutral-600 hover:text-neutral-900">{{ t('client.back_to_list') }}</RouterLink>
     </div>
 
-    <form @submit.prevent="submit" autocomplete="off" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <form @submit.prevent="submit" autocomplete="off" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <div class="p-5 space-y-4">
         <!-- Lookup helpers -->
         <div class="bg-primary-50 border border-primary-200 rounded-md p-3">
@@ -254,11 +318,11 @@ async function submit() {
                   @blur="checkDuplicateIc"
                   class="flex-1 h-9 px-3 border border-neutral-300 rounded-md font-mono text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
                 <button type="button" @click="loadFromAres" :disabled="!form.ic || aresLoading"
-                  class="px-3 h-9 text-sm bg-white border border-primary-300 text-primary-700 rounded-md hover:bg-primary-100 disabled:opacity-50">
+                  class="px-3 h-9 text-sm bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-100 disabled:opacity-50">
                   {{ aresLoading ? '…' : 'ARES' }}
                 </button>
               </div>
-              <p v-if="duplicateIc" class="text-xs text-amber-700 mt-1">
+              <p v-if="duplicateIc" class="text-xs text-warning-600 mt-1">
                 ⚠ {{ t('client.duplicate_ic') }} <strong>{{ duplicateIc.name }}</strong>
                 <RouterLink :to="`/clients/${duplicateIc.id}`" class="text-primary-700 hover:underline ml-1">{{ t('client.open_existing') }} →</RouterLink>
               </p>
@@ -270,11 +334,11 @@ async function submit() {
                   @blur="checkDuplicateDic"
                   class="flex-1 h-9 px-3 border border-neutral-300 rounded-md font-mono text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
                 <button type="button" @click="checkVies" :disabled="!form.dic || viesLoading"
-                  class="px-3 h-9 text-sm bg-white border border-primary-300 text-primary-700 rounded-md hover:bg-primary-100 disabled:opacity-50">
+                  class="px-3 h-9 text-sm bg-surface border border-primary-300 text-primary-700 rounded-md hover:bg-primary-100 disabled:opacity-50">
                   {{ viesLoading ? '…' : 'VIES' }}
                 </button>
               </div>
-              <p v-if="duplicateDic" class="text-xs text-amber-700 mt-1">
+              <p v-if="duplicateDic" class="text-xs text-warning-600 mt-1">
                 ⚠ {{ t('client.duplicate_dic') }} <strong>{{ duplicateDic.name }}</strong>
                 <RouterLink :to="`/clients/${duplicateDic.id}`" class="text-primary-700 hover:underline ml-1">{{ t('client.open_existing') }} →</RouterLink>
               </p>
@@ -330,31 +394,39 @@ async function submit() {
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.country') }}</label>
             <select v-model="form.country_iso2"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option v-for="c in countries" :key="c.iso2" :value="c.iso2">{{ locale === 'en' ? c.name_en : c.name_cs }}</option>
             </select>
           </div>
         </div>
 
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.language') }}</label>
             <select v-model="form.language"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option value="cs">Čeština</option>
               <option value="en">English</option>
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.payment_due_default') }}</label>
-            <input autocomplete="off" v-model.number="form.payment_due_default" type="number" min="1" max="365" placeholder="default"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
-          </div>
-          <div class="flex items-end">
-            <label class="flex items-center gap-2 text-sm h-10">
-              <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-              <span>{{ t('client.reverse_charge') }}</span>
-            </label>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.payment_due_label') }}</label>
+            <div class="flex gap-2 items-center">
+              <select v-model="clientDuePreset"
+                class="flex-1 min-w-0 h-10 px-2 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+                <option value="inherit">{{ t('client.payment_due_inherit', { default: supplierDueLabel }) }}</option>
+                <option value="7">{{ t('client.payment_due_preset_7') }}</option>
+                <option value="14">{{ t('client.payment_due_preset_14') }}</option>
+                <option value="month">{{ t('client.payment_due_preset_month') }}</option>
+                <option value="custom">{{ t('client.payment_due_preset_custom') }}</option>
+              </select>
+              <div v-if="clientDuePreset === 'custom'" class="flex items-center gap-1.5 shrink-0">
+                <input autocomplete="off" v-model.number="form.payment_due_default" type="number" min="1" max="365"
+                  class="w-20 h-10 px-2 border border-neutral-300 rounded-md text-sm font-mono focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                <span class="text-xs text-neutral-500">{{ t('client.payment_due_custom_days_suffix') }}</span>
+              </div>
+            </div>
+            <p v-if="clientDuePreset === 'month'" class="text-xs text-neutral-500 mt-1">{{ t('client.payment_due_month_hint') }}</p>
           </div>
         </div>
 
@@ -362,7 +434,7 @@ async function submit() {
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.currency_default') }}</label>
             <select v-model.number="form.currency_default_id"
-              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
               <option v-for="c in currencies" :key="c.id" :value="c.id">{{ c.label }}</option>
             </select>
           </div>
@@ -375,12 +447,18 @@ async function submit() {
           </div>
         </div>
 
-        <div>
+        <div class="space-y-2">
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="form.auto_send_reminders" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
-            <span>{{ t('client.auto_send_reminders') }}</span>
+            <input v-model="form.reverse_charge" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+            <span>{{ t('client.reverse_charge') }}</span>
           </label>
-          <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('client.auto_send_reminders_hint') }}</p>
+          <div>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="form.auto_send_reminders" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span>{{ t('client.auto_send_reminders') }}</span>
+            </label>
+            <p class="text-xs text-neutral-500 mt-1 ml-6">{{ t('client.auto_send_reminders_hint') }}</p>
+          </div>
         </div>
 
         <!-- Role flagy: klient i dodavatel současně -->
@@ -412,7 +490,7 @@ async function submit() {
               </span>
             </label>
           </div>
-          <p v-if="!form.is_customer && !form.is_vendor" class="text-xs text-red-600 mt-1">
+          <p v-if="!form.is_customer && !form.is_vendor" class="text-xs text-danger-600 mt-1">
             {{ t('client.roles_required') }}
           </p>
         </div>
@@ -421,13 +499,26 @@ async function submit() {
         <div v-if="form.is_vendor" class="pt-3 border-t border-neutral-100">
           <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.default_expense_category') }}</label>
           <select v-model="form.default_expense_category_id"
-            class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+            class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
             <option :value="null">— {{ t('client.default_expense_category_none') }} —</option>
             <option v-for="c in expenseCategories" :key="c.id" :value="c.id">
               {{ c.label }} ({{ c.code }})
             </option>
           </select>
           <p class="text-xs text-neutral-500 mt-1">{{ t('client.default_expense_category_hint') }}</p>
+        </div>
+
+        <!-- Výchozí kategorie tržby (jen pro zákazníky) -->
+        <div v-if="form.is_customer" class="pt-3 border-t border-neutral-100">
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.default_revenue_category') }}</label>
+          <select v-model="form.default_revenue_category_id"
+            class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+            <option :value="null">— {{ t('client.default_revenue_category_none') }} —</option>
+            <option v-for="c in revenueCategories" :key="c.id" :value="c.id">
+              {{ c.label }} ({{ c.code }})
+            </option>
+          </select>
+          <p class="text-xs text-neutral-500 mt-1">{{ t('client.default_revenue_category_hint') }}</p>
         </div>
 
         <div>
@@ -461,7 +552,7 @@ async function submit() {
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('client.invoice_number_period') }}</label>
               <select v-model="form.invoice_number_period"
-                class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+                class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
                 <option :value="null">{{ t('client.numbering_period_inherit') }}</option>
                 <option value="year">{{ t('client.numbering_period_year') }}</option>
                 <option value="month">{{ t('client.numbering_period_month') }}</option>
@@ -479,8 +570,8 @@ async function submit() {
 
       <div class="px-5 py-3 border-t border-neutral-200 bg-neutral-50 flex justify-end gap-3 rounded-b-lg">
         <button v-if="embedded" type="button" @click="emit('cancel')"
-          class="px-4 h-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-white text-sm font-medium">{{ t('common.cancel') }}</button>
-        <RouterLink v-else to="/clients" class="px-4 h-10 leading-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-white text-sm font-medium">{{ t('common.cancel') }}</RouterLink>
+          class="px-4 h-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface text-sm font-medium">{{ t('common.cancel') }}</button>
+        <RouterLink v-else to="/clients" class="px-4 h-10 leading-10 border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface text-sm font-medium">{{ t('common.cancel') }}</RouterLink>
         <button type="submit" :disabled="submitting"
           class="px-5 h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md">
           {{ submitting ? t('common.saving') : (isEdit ? t('common.save') : t('common.create')) }}

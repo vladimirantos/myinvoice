@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0] — 2026-05-29
+
+Kategorie tržeb (symetrie ke kategoriím nákladů) s rozpadem v CRM/Tržbách, přepočet všech měn na CZK v CRM dashboardu a sjednocené propojení souvisejících dokladů.
+
+### Added
+
+- **Kategorie tržeb** — nový číselník (Nastavení → Číselníky → Kategorie tržeb) symetrický ke kategoriím nákladů. Vydaná faktura má volbu kategorie tržby, výchozí kategorii lze přednastavit na **zákazníkovi** i na **zakázce** (zakázka má přednost před zákazníkem). Při nastavení/změně výchozí kategorie se doplní do všech existujících faktur daného zákazníka/zakázky, které kategorii nemají vyplněnou (backfill). Výchozí kategorie se aplikuje **konzistentně napříč všemi cestami vzniku faktury** — ruční zadání, importy (iDoklad, Fakturoid, ISDOC/ZIP), pravidelná fakturace i vyúčtování zálohy/proformy (tam se kategorie dědí ze zdrojového dokladu).
+- **Rozpad tržeb po kategoriích** — tabulka v CRM dashboardu a koláčový graf na stránce Tržby (rolling 12 měsíců, přepočet na CZK).
+- **CRM dashboard — volba „Vše (CZK)"** v přepínači měn: boxy Přehled (tento měsíc / od začátku roku) i měsíční graf sečtou všechny měny přepočtené na CZK. „Vše" je výchozí volbou, pokud má firma víc měn.
+- **Propojení souvisejících dokladů — banner v detailu faktury.** U proformy odkaz na vystavený daňový doklad a u daňového dokladu zpět na zálohovou fakturu; sjednocený vzhled (fialový banner) i u přijatých faktur (zálohová ↔ vyúčtovací faktura).
+- **Vestavěný cron v Docker image** — app kontejner volitelně spouští plánované úlohy sám (přepínač `MYINVOICE_ENABLE_CRON`, default zapnuto), takže základní Docker nasazení nevyžaduje externí scheduler. Crontab se generuje z `CronCatalog` (stejné úlohy i frekvence jako UI „Plánované úlohy", takže nechybí žádná úloha), úlohy běží jako `www-data` s logy v `${MYINVOICE_DATA_DIR}/log/cron`. Při více replikách app je nutné nastavit `MYINVOICE_ENABLE_CRON=0`, aby úlohy neběžely vícenásobně. (#64)
+- **Tenký scrollbar laděný do palety** v postranním menu (reusable utilita `.scrollbar-slim`, light/dark aware). (#69)
+
+### Fixed
+
+- **CRM dashboard — nesmyslné částky u cizí měny.** Při výběru měny (např. USD), která za dané období neměla žádný doklad, dlaždice „Přehled" ukazovaly částku jiné měny (typicky CZK) pod cizím labelem (např. „579 481,93 USD"). Nově se u chybějících dat zobrazí 0 ve zvolené měně. Stejný mislabel opraven u rozpadu nákladů (je vždy v CZK).
+- **Importy přijatých faktur nenastavovaly výchozí kategorii nákladů dodavatele** (AI extrakce, ISDOC, iDoklad, Fakturoid, bankovní párování) — doplňovalo se jen ručně v UI. Nově se výchozí kategorie nákladu aplikuje centrálně při zakládání přijaté faktury, takže ji dostanou všechny importní cesty.
+- **Popisky u zálohových přijatých faktur** — jeden nadpis „Zálohová faktura" se používal pro oba směry vazby. Vyúčtovací faktura má nově odlišný nadpis „Vyúčtování zálohy".
+
+### Changed
+
+- **Pole „Kategorie tržby" na vydané faktuře** je nově výběr z číselníku (dříve volný text). Stávající textové hodnoty se při migraci převedly na kategorie.
+
+## [4.5.4] — 2026-05-29
+
+Oprava režimu přenesení daňové povinnosti (reverse charge) na vystavených fakturách.
+
+### Fixed
+
+- **Reverse charge – sazba na faktuře** ukazovala „DPH 0 %" místo nominální sazby. Nově se na RC faktuře zobrazí **nominální sazba (21 %) s daní 0 Kč** a automatická poznámka „Daň odvede zákazník". RC je nově jen hlavičkový příznak (položka drží svou sazbu, daň vynuluje příznak); volba „Reverse charge" zmizela z výběru sazby na řádku (dělá se zaškrtnutím RC).
+- **Reverse charge – zařazení do DPH přiznání.** Tuzemský RC prodej se vykazoval na DPHDP3 ř.20 (dodání zboží do JČS) místo ř.25 (tuzemský režim přenesení §92). Klasifikace je nově **podle země odběratele**: tuzemský → ř.25 + KH A.1, zahraniční z EU → ř.20. (migrace `0072`)
+
+## [4.5.3] — 2026-05-29
+
+Server-side našeptávač klienta/dodavatele, oprava přepnutí typu nevystavené faktury a čitelný kalendář v tmavém režimu.
+
+### Fixed
+
+- **Přepnutí typu nevystavené faktury** (faktura ↔ proforma ↔ dobropis) se v editaci neuložilo — update vždy zachoval původní typ a `updateDraft` sloupec `invoice_type` neměnil. Nově lze typ u draftu změnit; vystavená faktura zůstává neměnná (číslo + auditní stopa).
+- **Tmavý režim** — nativní kalendář u výběru data (a další nativní prvky) byl černý na tmavém pozadí; přidán `color-scheme: dark`.
+
+### Changed
+
+- **Výběr klienta / dodavatele ve fakturách** — našeptávač nově hledá **server-side přímo v databázi** (název / IČO / DIČ) místo filtrování jen prvních 50 načtených. Týká se nové i editované vydané faktury, přijaté faktury (dodavatelé) a pravidelné fakturace. Řeší případ, kdy klient za první stránkou nešel ve faktuře vybrat, a škáluje nad 200 klientů.
+
+## [4.5.2] — 2026-05-29
+
+Opravy u přijatých faktur uhrazených zálohou a přenačtení detailu faktury při prokliku.
+
+### Fixed
+
+- **„K úhradě" u přijaté faktury uhrazené zálohou** ukazovalo celou částku místo 0 (nula v JS propadala přes `||` na celkovou částku). Hodnota v datech (`amount_to_pay`, generated column) byla správná, chyba byla jen v zobrazení detailu.
+- **Proklik mezi doklady nepřenačítal detail** (přijatá i vydaná faktura) — navigace `/…/:id → :id` recyklovala komponentu a `onMounted` se znovu nespustil; doplněn `watch` na změnu id.
+
+### Changed
+
+- **Seznam přijatých faktur** — sloupec „K úhradě" přejmenován na **„Celkem s DPH"** a řádky nově ukazují celkovou částku dokladu (dřív 0 u faktur uhrazených zálohou); řádky teď odpovídají měsíčnímu součtu.
+- **Editor přijaté faktury** — přidáno editovatelné pole **„Uhrazená záloha"** s dopočtem „K úhradě".
+
+## [4.5.1] — 2026-05-29
+
+Přílohy přímo v editoru faktury, robustní predikce ročního obratu, vyšší kontrast tmavého režimu a vylepšení statistik.
+
+### Added
+
+- **Přílohy v editoru faktury** — přílohy lze přidat už při tvorbě **nové** faktury (drží se v prohlížeči a nahrají se hned po vytvoření) i přidávat/mazat u **existující** faktury přímo v editoru, nejen v detailu. Sekce je pod Výkazem víceprací. Limity 10 MiB/soubor, 20 MiB celkem.
+- **Robustní predikce ročního obratu** — místo growth-adjusted seasonality nově **medián tří nezávislých projekcí** (run-rate, sezonalita × krátkodobý růst, sezonalita × dlouhodobý CAGR trend) + rozpětí min–max. Odolnější vůči zkreslení z krátkého YTD okna na začátku roku, kdy starý model přestřeloval. (#66)
+
+### Changed
+
+- **Tmavý režim** — vyšší kontrast tlumeného textu (popisky, placeholdery): `neutral-500` a `-400` zesvětleny, muted text z ~4.3 na ~5.5:1 (WCAG AA). Hlavní text beze změny (záměrně mírně odbílá, aby nezářil).
+- **Statistiky** — dlaždice „Top klienti" a „Top zakázky" se při chybějících loňských datech zobrazí **vedle sebe** (jinak pod sebou); „Forecast" přejmenován na **„Predikce"**; bez loňského roku se místo růstu YoY ukáže run-rate poznámka (žádné „NaN").
+
+## [4.5.0] — 2026-05-29
+
+Tmavý režim (dark mode) s přepínačem **Systém / Světlý / Tmavý** a úpravy dashboardu.
+
+### Added
+
+- **Tmavý režim (dark mode)** — přepínač **Systém / Světlý / Tmavý** v horní liště, na mobilu v rozbalovacím menu vedle přepínače jazyka. Výchozí *Systém* sleduje nastavení operačního systému (`prefers-color-scheme`), ruční volba se ukládá do prohlížeče (per zařízení). Řešeno token-driven — třída `.dark` přepisuje hodnoty CSS proměnných, takže se přepne celá aplikace včetně grafů; při načtení nebliká. Světlý režim zůstává beze změny. (#65)
+
+### Changed
+
+- **Dashboard** — homepage zobrazuje jen **aktivní měny** (neaktivní měny se v přehledu tržeb už neukazují). Při jediné aktivní měně je graf tržeb vyšší (vlevo) a KPI boxy jsou v matici 2×2 vpravo; při více měnách beze změny. V sekci nákladů je box „CRM" nahrazen **mini grafem nákladů** za posledních 12 měsíců.
+
+## [4.4.0] — 2026-05-29
+
+Nová sekce **Dokumenty** (souborové úložiště), presety výchozí splatnosti a výchozí kategorie nákladu.
+
+### Added
+
+- **Sekce Dokumenty** — souborové úložiště s hybridní organizací: strom složek + vazby na entity (klient, vydaná/přijatá faktura, zakázka) + tagy + fulltextové hledání. Automatické rozbalení datových zpráv **ZFO** (PKCS#7, kompletní metadata ISDS) a **ZIP** (dvojí režim: rozbalit a kategorizovat / nahrát jako jeden archiv). Nahrávání jednotlivých souborů, celých složek (drag&drop i přes dialog) i velkých souborů po částech (obchází PHP `post_max_size`) — vše na pozadí přes joby s průběhem. Náhledy (první strana PDF / obrázky), inline PDF preview, koš (soft-delete + vysypání). Oboustranné vazby v detailu klienta, faktury i zakázky. (migrace `0067`–`0069`)
+- **Hromadné akce nad Dokumenty** — výběr **souborů i složek současně** s hromadným exportem do ZIP (se zachováním stromové struktury), přesunem přes stromový picker a smazáním. Velikost složek přímo v dlaždici. Na mobilu se akce složky odkryjí dvojím ťuknutím (ochrana proti nechtěnému smazání).
+- **Presety výchozí splatnosti** — v nastavení dodavatele, u klienta i u zakázky lze místo prostého počtu dnů zvolit `7 dnů / 14 dnů / Měsíc / Vlastní`. **Měsíc** je skutečný kalendářní měsíc (1. 2. → 1. 3., 31. 1. → 28. 2.), ne fixních 30 dnů. Klient i zakázka mohou dědit z dodavatele; v editoru faktury platí priorita zakázka → klient → dodavatel, každá úroveň s vlastní jednotkou. (#61, migrace `0070`, `0071`)
+- **Výchozí kategorie nákladu** na dodavateli (firmě) s propagací do přijatých faktur, zobrazení kategorie v detailu přijaté faktury a filtr dodavatelů podle výchozí kategorie.
+- **Plně ENV-konfigurovatelné SMTP** v Docker Compose + guard proti přepisu prázdnými ENV hodnotami. (#60)
+
+### Fixed
+
+- **Klasifikace plnění na řádcích vydané faktury** — `GET /api/invoices/{id}` nevracel `vat_classification_code` na položkách (jen na hlavičce), takže `GET → úprava → PUT` tiše zahodil ručně nastavenou klasifikaci řádku. (#62)
+- **Zaplacená nespárovaná přijatá záloha** se nezapočítávala do nákladů (cash sémantika).
+
 ## [4.3.12] — 2026-05-28
 
 Globální vyhledávání v postranním panelu.

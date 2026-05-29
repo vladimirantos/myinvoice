@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Document;
 
+use MyInvoice\Repository\DocumentFolderRepository;
 use MyInvoice\Repository\DocumentRepository;
 use MyInvoice\Repository\ImportJobRepository;
 
@@ -25,6 +26,7 @@ final class DocumentJobService
         private readonly DocumentIngestService $ingest,
         private readonly DocumentStorage $storage,
         private readonly DocumentRepository $documents,
+        private readonly DocumentFolderRepository $folders,
     ) {}
 
     public function run(int $jobId): void
@@ -192,13 +194,28 @@ final class DocumentJobService
     /** @param array<string,mixed> $params */
     private function runExport(int $jobId, int $sid, array $params): void
     {
-        $ids = array_values(array_filter(array_map('intval', (array) ($params['ids'] ?? []))));
-        if ($ids === []) {
-            $this->jobs->markFailed($jobId, 'Nebyly vybrány žádné dokumenty.');
+        $docIds = array_values(array_filter(array_map('intval', (array) ($params['ids'] ?? []))));
+        $folderIds = array_values(array_filter(array_map('intval', (array) ($params['folder_ids'] ?? []))));
+        if ($docIds === [] && $folderIds === []) {
+            $this->jobs->markFailed($jobId, 'Nebyly vybrány žádné položky.');
             return;
         }
         if (!class_exists(\ZipArchive::class)) {
             $this->jobs->markFailed($jobId, 'ext-zip není dostupné.');
+            return;
+        }
+
+        // Vybrané složky → dokumenty se zachováním stromu (prefix cesty v ZIP).
+        // $plan: list<array{id:int, prefix:string}>  (prefix '' = kořen ZIP)
+        [$plan, $seenDocIds] = $this->expandFolderSelection($sid, $folderIds);
+        // Volně vybrané dokumenty jdou do kořene ZIP; přeskoč ty, co už pokryla složka.
+        foreach ($docIds as $id) {
+            if (isset($seenDocIds[$id])) continue;
+            $seenDocIds[$id] = true;
+            $plan[] = ['id' => $id, 'prefix' => ''];
+        }
+        if ($plan === []) {
+            $this->jobs->markFailed($jobId, 'Žádný soubor k zabalení.');
             return;
         }
 
@@ -210,8 +227,8 @@ final class DocumentJobService
         $relPath = 'sup-' . $sid . '/_jobs/export-' . $jobId . '.zip';
         $outPath = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('documents') . '/' . $relPath;
 
-        $this->jobs->updateProgress($jobId, ['total_items' => count($ids), 'current_step' => 'Balím dokumenty']);
-        $this->jobs->appendLog($jobId, 'Sestavuji ZIP z ' . count($ids) . ' dokumentů…');
+        $this->jobs->updateProgress($jobId, ['total_items' => count($plan), 'current_step' => 'Balím dokumenty']);
+        $this->jobs->appendLog($jobId, 'Sestavuji ZIP z ' . count($plan) . ' souborů…');
 
         $zip = new \ZipArchive();
         if ($zip->open($outPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
@@ -222,25 +239,26 @@ final class DocumentJobService
         $used = [];
         $added = 0;
         $processed = 0;
-        foreach ($ids as $id) {
+        foreach ($plan as $item) {
             if ($processed % self::CANCEL_CHECK_EVERY === 0 && $this->jobs->isCancelRequested($jobId)) {
                 $zip->close();
                 @unlink($outPath);
                 $this->jobs->markCancelled($jobId);
                 return;
             }
-            $doc = $this->documents->findRaw($id, $sid, false);
+            $doc = $this->documents->findRaw($item['id'], $sid, false);
             $processed++;
             if ($doc === null) { $this->jobs->updateProgress($jobId, ['processed' => $processed]); continue; }
             $path = $this->storage->pathFor($sid, (string) $doc['sha256'], (string) $doc['filename']);
             if (!is_file($path)) { $this->jobs->updateProgress($jobId, ['processed' => $processed]); continue; }
 
             $name = $this->storage->sanitizeFilename((string) $doc['original_name']);
-            $entry = $name;
+            $prefix = $item['prefix'] !== '' ? $item['prefix'] . '/' : '';
+            $entry = $prefix . $name;
             $n = 1;
             while (isset($used[$entry])) {
                 $ext = pathinfo($name, PATHINFO_EXTENSION);
-                $entry = pathinfo($name, PATHINFO_FILENAME) . '-' . (++$n) . ($ext !== '' ? '.' . $ext : '');
+                $entry = $prefix . pathinfo($name, PATHINFO_FILENAME) . '-' . (++$n) . ($ext !== '' ? '.' . $ext : '');
             }
             $used[$entry] = true;
             if ($zip->addFile($path, $entry)) $added++;
@@ -258,8 +276,69 @@ final class DocumentJobService
 
         $size = (int) filesize($outPath);
         $this->jobs->setResult($jobId, $relPath, 'dokumenty-' . $jobId . '.zip', $size, 'application/zip');
-        $this->jobs->updateProgress($jobId, ['processed' => count($ids), 'created_count' => $added]);
+        $this->jobs->updateProgress($jobId, ['processed' => count($plan), 'created_count' => $added]);
         $this->jobs->appendLog($jobId, 'Hotovo: ' . $added . ' souborů, ' . round($size / 1024, 1) . ' KB.');
         $this->jobs->markCompleted($jobId);
+    }
+
+    /**
+     * Rozbalí vybrané složky na plán dokumentů se zachováním stromu. Z vícenásobně
+     * vybraných (složka i její podsložka) bere jen nejvyšší úroveň, aby se prefix
+     * neduplikoval; každý dokument dostane cestu „Kořen/Podsložka".
+     *
+     * @param int[] $folderIds
+     * @return array{0: list<array{id:int, prefix:string}>, 1: array<int,bool>}
+     *               plán + množina už pokrytých document id (k dedup volných výběrů)
+     */
+    private function expandFolderSelection(int $sid, array $folderIds): array
+    {
+        $folderIds = array_values(array_filter(array_map('intval', $folderIds), static fn(int $v): bool => $v > 0));
+        if ($folderIds === []) return [[], []];
+
+        $byId = [];
+        $childrenOf = [];
+        foreach ($this->folders->listAll($sid) as $f) {
+            $fid = (int) $f['id'];
+            $byId[$fid] = $f;
+            $childrenOf[(int) ($f['parent_id'] ?? 0)][] = $fid;
+        }
+
+        $selectedSet = [];
+        foreach ($folderIds as $id) {
+            if (isset($byId[$id])) $selectedSet[$id] = true;
+        }
+        // Nejvyšší vybrané = bez vybraného předka (jinak by se dokument zabalil 2×).
+        $hasSelectedAncestor = static function (int $id) use ($byId, $selectedSet): bool {
+            $cur = $byId[$id]['parent_id'] ?? null;
+            $guard = 0;
+            while ($cur !== null && $guard++ < 256) {
+                if (isset($selectedSet[(int) $cur])) return true;
+                $cur = $byId[(int) $cur]['parent_id'] ?? null;
+            }
+            return false;
+        };
+
+        // BFS podstromem každého top-level kořene; prefix = sanitizovaný strom názvů.
+        $prefixByFolder = [];
+        foreach (array_keys($selectedSet) as $root) {
+            if ($hasSelectedAncestor($root)) continue;
+            $stack = [[$root, $this->storage->sanitizeFilename((string) $byId[$root]['name'])]];
+            while ($stack !== []) {
+                [$fid, $prefix] = array_pop($stack);
+                $prefixByFolder[$fid] = $prefix;
+                foreach ($childrenOf[$fid] ?? [] as $child) {
+                    $stack[] = [$child, $prefix . '/' . $this->storage->sanitizeFilename((string) $byId[$child]['name'])];
+                }
+            }
+        }
+
+        $plan = [];
+        $seen = [];
+        foreach ($this->documents->rawByFolderIds($sid, array_keys($prefixByFolder)) as $d) {
+            $id = (int) $d['id'];
+            $seen[$id] = true;
+            $plan[] = ['id' => $id, 'prefix' => $prefixByFolder[(int) $d['folder_id']] ?? ''];
+        }
+        return [$plan, $seen];
     }
 }

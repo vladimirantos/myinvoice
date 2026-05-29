@@ -243,7 +243,9 @@ final class PurchaseInvoiceRepository
                        pi.status, pi.booked_at, pi.paid_at, pi.cancelled_at,
                        pi.extraction_warning, pi.vat_deduction, pi.vat_deduction_percent, pi.tax_deductible,
                        c.company_name AS vendor_company_name, c.ic AS vendor_ic,
-                       DATE_FORMAT(pi.issue_date, '%Y-%m') AS month_bucket
+                       DATE_FORMAT(pi.issue_date, '%Y-%m') AS month_bucket,
+                       EXISTS (SELECT 1 FROM purchase_invoices adv_f
+                               WHERE adv_f.advance_purchase_invoice_id = pi.id) AS is_settled_advance
                        {$selectTotal}
                   FROM purchase_invoices pi
                   JOIN clients c ON c.id = pi.vendor_id
@@ -277,6 +279,11 @@ final class PurchaseInvoiceRepository
         $grouped = [];
         foreach ($rows as $row) {
             unset($row['total_rows']); // metadata, nepatří do invoice payloadu
+            // Spárovaná záloha = advance, na kterou ukazuje finální (vyúčtovací) faktura.
+            // Zachytit z DB flagu PŘED castem a vyřadit z payloadu (interní metadata).
+            $isSettledAdvance = (string) ($row['document_kind'] ?? '') === 'advance'
+                && (int) ($row['is_settled_advance'] ?? 0) === 1;
+            unset($row['is_settled_advance']);
             $row = $this->castInvoice($row);
             $month = (string) $row['month_bucket'];
             if (!isset($grouped[$month])) {
@@ -290,8 +297,13 @@ final class PurchaseInvoiceRepository
             $grouped[$month]['invoices'][] = $row;
             $grouped[$month]['count']++;
 
-            // Nákupy: nezahrnujeme draft (koncepty), cancelled (storno)
-            if (!in_array($row['status'], ['draft', 'cancelled'], true)) {
+            // Měsíční součet = reálný náklad. Vyřadit: draft/cancelled a spárovanou/zaplacenou
+            // zálohu (advance) — náklad nese finální faktura, jinak 2× započteno (shoda s
+            // costs_by_month / CRM). Nespárovaná nezaplacená záloha se počítá (očekávaný náklad).
+            // Řádek se i tak zobrazí (analogicky proforma u vystavených faktur).
+            $excludedAdvance = $row['document_kind'] === 'advance'
+                && ($row['status'] === 'paid' || $isSettledAdvance);
+            if (!in_array($row['status'], ['draft', 'cancelled'], true) && !$excludedAdvance) {
                 $cur = $row['currency'];
                 if (!isset($grouped[$month]['totals_per_currency'][$cur])) {
                     $grouped[$month]['totals_per_currency'][$cur] = [
@@ -339,12 +351,23 @@ final class PurchaseInvoiceRepository
         }
 
         // Sanity check: vendor existuje a patří tenantovi
-        $stmt = $pdo->prepare('SELECT supplier_id FROM clients WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT supplier_id, default_expense_category_id FROM clients WHERE id = ?');
         $stmt->execute([$vendorId]);
-        $vendorSupplier = (int) $stmt->fetchColumn();
+        $vendorRow = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        $vendorSupplier = (int) ($vendorRow['supplier_id'] ?? 0);
         if ($vendorSupplier !== $supplierId) {
             throw new \InvalidArgumentException("Vendor #$vendorId nepatří tomuto tenantovi.");
         }
+
+        // Výchozí kategorie nákladu dodavatele — aplikuje se, pokud volající kategorii
+        // explicitně neurčil. Platí pro manuální zadání i pro všechny importy
+        // (AI, ISDOC/ZIP, iDoklad, Fakturoid, bankovní párování), které jdou tudy.
+        // Sjednocuje chování se server-side backfillem v ClientRepository::update().
+        $expenseCategoryId = (isset($data['expense_category_id']) && $data['expense_category_id'])
+            ? (int) $data['expense_category_id']
+            : (($vendorRow['default_expense_category_id'] ?? null) !== null
+                ? (int) $vendorRow['default_expense_category_id']
+                : null);
 
         // Vendor invoice number — povinné, validace max 50 znaků
         $vendorInvoiceNumber = trim((string) ($data['vendor_invoice_number'] ?? ''));
@@ -419,7 +442,7 @@ final class PurchaseInvoiceRepository
             max(0.0, min(100.0, (float) ($data['vat_deduction_percent'] ?? 100))),
             (array_key_exists('tax_deductible', $data) && !$data['tax_deductible']) ? 0 : 1,
             !empty($data['is_fixed_asset']) ? 1 : 0,
-            isset($data['expense_category_id']) && $data['expense_category_id'] ? (int) $data['expense_category_id'] : null,
+            $expenseCategoryId,
             $userId,
         ]);
 

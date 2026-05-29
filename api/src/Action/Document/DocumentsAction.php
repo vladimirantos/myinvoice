@@ -275,15 +275,16 @@ final class DocumentsAction
         return Json::ok($response, ['ok' => true, 'deleted' => $count]);
     }
 
-    /** POST /api/documents/bulk {action, ids[], folder_id?, tags?} */
+    /** POST /api/documents/bulk {action, ids[], folder_ids[]?, folder_id?, tags?} */
     public function bulk(Request $request, Response $response): Response
     {
         $sid = $this->supplierId($request);
         $body = (array) $request->getParsedBody();
         $action = (string) ($body['action'] ?? '');
         $ids = array_values(array_filter(array_map('intval', (array) ($body['ids'] ?? []))));
-        if ($ids === []) {
-            return Json::error($response, 'no_ids', 'Nebyly vybrány žádné dokumenty.', 400);
+        $folderIds = array_values(array_filter(array_map('intval', (array) ($body['folder_ids'] ?? []))));
+        if ($ids === [] && $folderIds === []) {
+            return Json::error($response, 'no_ids', 'Nebyly vybrány žádné položky.', 400);
         }
 
         $userId = $this->userId($request);
@@ -298,11 +299,24 @@ final class DocumentsAction
                 foreach ($ids as $id) {
                     if ($this->documents->move($id, $sid, $folderId)) $affected++;
                 }
+                // Složky: zákaz přesunu do sebe / vlastního potomka (cyklus).
+                foreach ($folderIds as $fid) {
+                    if ($folderId !== null && ($folderId === $fid
+                        || in_array($folderId, $this->folders->descendantIds($fid, $sid), true))) {
+                        continue;
+                    }
+                    if ($this->folders->move($fid, $sid, $folderId)) $affected++;
+                }
                 break;
 
             case 'delete':
                 foreach ($ids as $id) {
                     if ($this->documents->softDelete($id, $sid, $userId)) $affected++;
+                }
+                foreach ($folderIds as $fid) {
+                    if ($this->folders->find($fid, $sid) === null) continue;
+                    $this->folders->softDeleteSubtree($fid, $sid, $userId);
+                    $affected++;
                 }
                 break;
 

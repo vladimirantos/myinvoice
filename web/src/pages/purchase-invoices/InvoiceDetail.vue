@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { purchaseInvoicesApi, type PurchaseInvoice, type PurchaseInvoiceStatus, type PurchaseInvoiceBrief } from '@/api/purchaseInvoices'
@@ -108,6 +108,9 @@ const activity = ref<Array<{
 const id = computed(() => Number(route.params.id))
 
 onMounted(load)
+// Detail se recykluje při navigaci /purchase-invoices/:id → :id (např. proklik na zálohu/vyúčtování),
+// onMounted se znovu nespustí → bez tohoto watch by se obsah nepřenačetl (vypadalo to jako „self / nic se neděje").
+watch(id, load)
 
 async function load() {
   loading.value = true
@@ -314,7 +317,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             {{ t('purchase_invoice.export.menu') }}
             <svg class="w-3 h-3 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
           </summary>
-          <div class="absolute right-0 top-full mt-1 z-20 bg-white border border-neutral-200 rounded-md shadow-lg min-w-[220px]">
+          <div class="absolute right-0 top-full mt-1 z-20 bg-surface border border-neutral-200 rounded-md shadow-lg min-w-[220px]">
             <a :href="purchaseInvoicesApi.ourPdfUrl(invoice.id)" target="_blank"
               class="cursor-pointer block px-4 py-2 text-sm hover:bg-neutral-50 text-neutral-700">
               <svg class="inline w-4 h-4 mr-1" viewBox="0 0 32 36"><path fill="#dc2626" d="M4 2h16l8 8v22a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><text x="16" y="26" fill="#fff" font-size="8" font-weight="700" text-anchor="middle">PDF</text></svg>
@@ -381,10 +384,33 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
     </div>
 
+    <!-- ═══ Propojení se zálohou — banner pod headerem (sjednoceno s vydanou fakturou) ═══ -->
+    <!-- Tento doklad JE záloha → odkaz na vyúčtovací fakturu -->
+    <RouterLink v-if="invoice.settled_by" :to="`/purchase-invoices/${invoice.settled_by.id}`"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm hover:bg-primary-100 transition">
+      <span class="text-primary-700">{{ t('purchase_invoice.advance_link.settled_by') }}</span>
+      <span class="font-medium text-primary-700 font-mono">{{ invoice.settled_by.varsymbol || invoice.settled_by.vendor_invoice_number || ('#' + invoice.settled_by.id) }} →</span>
+    </RouterLink>
+    <!-- Vyúčtovací faktura → odkaz na započtenou zálohu (+ odpojení) -->
+    <div v-else-if="invoice.linked_advance"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm">
+      <span class="text-primary-700 min-w-0">
+        {{ t('purchase_invoice.advance_link.linked_to') }}
+        <RouterLink :to="`/purchase-invoices/${invoice.linked_advance.id}`" class="font-mono font-medium hover:underline">
+          {{ invoice.linked_advance.varsymbol || invoice.linked_advance.vendor_invoice_number || ('#' + invoice.linked_advance.id) }}
+        </RouterLink>
+        <span class="text-primary-700/70 font-mono">(−{{ formatMoney(invoice.linked_advance.total_with_vat, invoice.linked_advance.currency) }})</span>
+      </span>
+      <button v-if="auth.canWrite" type="button" @click="unlinkAdvance" :disabled="linkingAdvance"
+        class="cursor-pointer text-xs px-2 py-1 border border-neutral-300 rounded text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 shrink-0 bg-surface">
+        {{ t('purchase_invoice.advance_link.unlink') }}
+      </button>
+    </div>
+
     <!-- ═══ Datumy & metadata (3 sloupce ala vystavená InvoiceDetail) ═══ -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
       <!-- Datumy -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.issue_date') }} / {{ t('purchase_invoice.fields.tax_date') }} / {{ t('purchase_invoice.fields.due_date') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.fields.issue_date') }}</dt><dd class="font-mono">{{ formatDate(invoice.issue_date) }}</dd></div>
@@ -396,7 +422,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
 
       <!-- Měna & kurz -->
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.currency') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.fields.currency') }}</dt><dd class="font-mono">{{ invoice.currency }}</dd></div>
@@ -429,7 +455,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
 
       <!-- Platba v jiné měně -->
-      <div v-if="invoice.payment_currency_id" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div v-if="invoice.payment_currency_id" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.payment_currency.toggle') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('purchase_invoice.payment_currency.currency') }}</dt><dd class="font-mono">{{ invoice.payment_currency || '—' }}</dd></div>
@@ -441,7 +467,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ Položky ═══ -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <h3 class="text-sm font-medium text-neutral-700 px-5 py-3 border-b border-neutral-100">{{ t('purchase_invoice.items.title') }}</h3>
       <table class="w-full text-sm">
         <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
@@ -469,7 +495,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
 
     <!-- ═══ Totals + VAT breakdown ═══ -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.vat_breakdown.title') }}</h3>
         <table class="w-full text-sm">
           <thead>
@@ -490,7 +516,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
           </tbody>
         </table>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.totals.with_vat') }}</h3>
         <dl class="space-y-2 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-600">{{ t('purchase_invoice.totals.without_vat') }}</dt><dd class="font-mono">{{ formatMoney(invoice.total_without_vat, invoice.currency) }}</dd></div>
@@ -501,7 +527,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
             <div class="flex justify-between font-semibold border-t border-neutral-100 pt-2"><dt>{{ t('purchase_invoice.totals.with_vat_rounded') }}</dt><dd class="font-mono">{{ formatMoney(invoice.total_with_vat + invoice.rounding, invoice.currency) }}</dd></div>
           </template>
           <div v-if="invoice.advance_paid_amount > 0" class="flex justify-between text-neutral-500"><dt>{{ t('purchase_invoice.totals.advance_paid') }}</dt><dd class="font-mono">−{{ formatMoney(invoice.advance_paid_amount, invoice.currency) }}</dd></div>
-          <div class="flex justify-between font-semibold text-lg border-t border-neutral-200 pt-2"><dt>{{ t('purchase_invoice.totals.to_pay') }}</dt><dd class="font-mono">{{ formatMoney((invoice.amount_to_pay || invoice.total_with_vat) + (invoice.rounding || 0), invoice.currency) }}</dd></div>
+          <div class="flex justify-between font-semibold text-lg border-t border-neutral-200 pt-2"><dt>{{ t('purchase_invoice.totals.to_pay') }}</dt><dd class="font-mono">{{ formatMoney((invoice.amount_to_pay ?? invoice.total_with_vat) + (invoice.rounding || 0), invoice.currency) }}</dd></div>
           <!-- CZK přepočet (jen pokud faktura není CZK + má exchange_rate) -->
           <template v-if="invoice.currency !== 'CZK' && invoice.exchange_rate">
             <div class="border-t border-neutral-200 pt-3 mt-3">
@@ -522,38 +548,23 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
       </div>
     </div>
 
-    <!-- ═══ Propojení se zálohovou fakturou (advance) ═══ -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm p-5">
-      <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.advance_link.title') }}</h3>
+    <!-- ═══ Správa propojení se zálohou — jen nelinkované stavy (linkované jsou v banneru pod headerem) ═══ -->
+    <div v-if="!invoice.settled_by && !invoice.linked_advance"
+      class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-5">
+      <h3 class="text-sm font-medium text-neutral-700 mb-3">
+        {{ invoice.document_kind === 'advance'
+            ? t('purchase_invoice.advance_link.title')
+            : t('purchase_invoice.advance_link.title_settlement') }}
+      </h3>
 
-      <!-- Tento doklad JE záloha → reverzní pohled (kdo ji vyúčtovává) -->
-      <template v-if="invoice.document_kind === 'advance'">
-        <div v-if="invoice.settled_by" class="text-sm">
-          {{ t('purchase_invoice.advance_link.settled_by') }}
-          <RouterLink :to="`/purchase-invoices/${invoice.settled_by.id}`" class="text-primary-700 hover:underline font-mono">
-            {{ invoice.settled_by.varsymbol || invoice.settled_by.vendor_invoice_number || ('#' + invoice.settled_by.id) }}
-          </RouterLink>
-        </div>
-        <div v-else class="text-sm text-neutral-500">{{ t('purchase_invoice.advance_link.not_settled') }}</div>
-      </template>
+      <!-- Záloha zatím nevyúčtovaná -->
+      <div v-if="invoice.document_kind === 'advance'" class="text-sm text-neutral-500">
+        {{ t('purchase_invoice.advance_link.not_settled') }}
+      </div>
 
-      <!-- Finální faktura → spárováno / AI návrh / párovat -->
+      <!-- Vyúčtovací faktura bez propojení → AI návrh / spárovat -->
       <template v-else>
-        <div v-if="invoice.linked_advance" class="flex items-center justify-between gap-3 text-sm">
-          <div>
-            {{ t('purchase_invoice.advance_link.linked_to') }}
-            <RouterLink :to="`/purchase-invoices/${invoice.linked_advance.id}`" class="text-primary-700 hover:underline font-mono">
-              {{ invoice.linked_advance.varsymbol || invoice.linked_advance.vendor_invoice_number || ('#' + invoice.linked_advance.id) }}
-            </RouterLink>
-            <span class="text-neutral-500 font-mono">(−{{ formatMoney(invoice.linked_advance.total_with_vat, invoice.linked_advance.currency) }})</span>
-          </div>
-          <button v-if="auth.canWrite" type="button" @click="unlinkAdvance" :disabled="linkingAdvance"
-            class="cursor-pointer text-xs px-2 py-1 border border-neutral-300 rounded text-neutral-600 hover:bg-neutral-50 disabled:opacity-50 shrink-0">
-            {{ t('purchase_invoice.advance_link.unlink') }}
-          </button>
-        </div>
-
-        <div v-else-if="invoice.advance_link_suggestion" class="p-3 bg-primary-50 border border-primary-500/30 rounded-md flex gap-3 items-start">
+        <div v-if="invoice.advance_link_suggestion" class="p-3 bg-primary-50 border border-primary-500/30 rounded-md flex gap-3 items-start">
           <div class="text-sm flex-1 min-w-0">
             <div class="font-medium text-primary-700">{{ t('purchase_invoice.advance_link.ai_suggestion_title') }}</div>
             <div class="text-neutral-600 mt-1">
@@ -586,7 +597,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
 
     <!-- Modal výběru zálohy k propojení -->
     <div v-if="advanceModalOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="advanceModalOpen = false">
-      <div class="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
+      <div class="bg-surface rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
         <div class="px-5 py-3 border-b border-neutral-100 flex items-center justify-between">
           <h3 class="font-medium">{{ t('purchase_invoice.advance_link.modal_title') }}</h3>
           <button type="button" @click="advanceModalOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-600">✕</button>
@@ -608,7 +619,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ Originální PDF od dodavatele ═══ -->
-    <div v-if="invoice.pdf_path" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="invoice.pdf_path" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <div class="flex items-center justify-between px-5 py-3 border-b border-neutral-100">
         <div class="flex items-center gap-3">
           <svg class="w-7 h-8 shrink-0" viewBox="0 0 32 36" xmlns="http://www.w3.org/2000/svg">
@@ -652,13 +663,13 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
         ></iframe>
       </div>
     </div>
-    <div v-else class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-else class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.pdf.title') }}</h3>
       <p class="text-sm text-neutral-500">{{ t('purchase_invoice.pdf.no_pdf') }}</p>
     </div>
 
     <!-- ═══ Poznámky (jen pokud existují) ═══ -->
-    <div v-if="invoice.note_above_items || invoice.note_below_items" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice.note_above_items || invoice.note_below_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('purchase_invoice.fields.note_above_items') }} / {{ t('purchase_invoice.fields.note_below_items') }}</h3>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         <div v-if="invoice.note_above_items">
@@ -673,7 +684,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ More actions (vendor detail link, paralel s vystavenou InvoiceDetail) ═══ -->
-    <div v-if="invoice && (invoice.vendor_id || canForceEdit || canForceDelete)" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice && (invoice.vendor_id || canForceEdit || canForceDelete)" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.more_actions') }}</h3>
       <div class="flex flex-wrap gap-2">
         <RouterLink v-if="invoice.vendor_id" :to="`/clients/${invoice.vendor_id}`"
@@ -699,7 +710,7 @@ function transitionLabel(target: PurchaseInvoiceStatus): string {
     </div>
 
     <!-- ═══ Activity log (paralel s /invoices) ═══ -->
-    <div v-if="activity.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="activity.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <header class="px-5 py-3 border-b border-neutral-200">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.activity') }}</h3>
       </header>

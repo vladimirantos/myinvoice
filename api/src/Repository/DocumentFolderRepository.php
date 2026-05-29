@@ -25,7 +25,10 @@ final class DocumentFolderRepository
                           WHERE c.parent_id = f.id AND c.deleted_at IS NULL) AS subfolder_count,
                        (SELECT COUNT(*) FROM documents d
                           WHERE d.folder_id = f.id AND d.deleted_at IS NULL
-                            AND d.parent_document_id IS NULL) AS file_count
+                            AND d.parent_document_id IS NULL) AS file_count,
+                       (SELECT COALESCE(SUM(d.size_bytes), 0) FROM documents d
+                          WHERE d.folder_id = f.id AND d.deleted_at IS NULL
+                            AND d.parent_document_id IS NULL) AS total_bytes
                   FROM document_folders f
                  WHERE f.supplier_id = ? AND f.deleted_at IS NULL
                    AND ' . ($parentId === null ? 'f.parent_id IS NULL' : 'f.parent_id = ?') . '
@@ -196,6 +199,7 @@ final class DocumentFolderRepository
             'created_at'      => (string) ($r['created_at'] ?? ''),
             'subfolder_count' => isset($r['subfolder_count']) ? (int) $r['subfolder_count'] : 0,
             'file_count'      => isset($r['file_count']) ? (int) $r['file_count'] : 0,
+            'total_bytes'     => isset($r['total_bytes']) ? (int) $r['total_bytes'] : 0,
         ];
     }
 }

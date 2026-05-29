@@ -44,9 +44,18 @@ const trashMode = computed(() => route.query.trash === '1')
 const trashDocs = ref<DocItem[]>([])
 const trashFolders = ref<DocFolder[]>([])
 
-// selection
+// selection (dokumenty i složky současně)
 const selected = ref<Set<number>>(new Set())
-const selCount = computed(() => selected.value.size)
+const selectedFolders = ref<Set<number>>(new Set())
+const selDocCount = computed(() => selected.value.size)
+const selFolderCount = computed(() => selectedFolders.value.size)
+const selCount = computed(() => selDocCount.value + selFolderCount.value)
+
+// Mobilní odkrytí akcí složky: bez hoveru jsou ikony přejmenovat/smazat skryté.
+// První ťuk je jen odkryje (canHover=false → pointer-events vypnuté), teprve další ťuk akci spustí.
+const canHover = ref(true)
+const revealedFolderId = ref<number | null>(null)
+function revealFolderActions(f: DocFolder) { revealedFolderId.value = f.id }
 
 // upload
 const uploading = ref(false)
@@ -65,6 +74,7 @@ const anyJobActive = computed(() => jobs.value.some(j => j.status === 'queued' |
 const moveOpen = ref(false)
 const allFolders = ref<DocFolder[]>([])
 const moveTargetIds = ref<number[]>([])
+const moveTargetFolders = ref<number[]>([])
 
 // řazení (client-side; default dle názvu vzestupně)
 const sortKey = ref<'name' | 'size' | 'created'>('name')
@@ -102,6 +112,8 @@ const bulkTags = ref<string[]>([])
 async function loadListing() {
   loading.value = true
   selected.value = new Set()
+  selectedFolders.value = new Set()
+  revealedFolderId.value = null
   try {
     const r = await documentsApi.list(folderId.value, { tag: tagFilter.value || undefined })
     breadcrumb.value = r.breadcrumb
@@ -147,10 +159,15 @@ function toggleSel(id: number) {
   s.has(id) ? s.delete(id) : s.add(id)
   selected.value = s
 }
+function toggleFolderSel(id: number) {
+  const s = new Set(selectedFolders.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  selectedFolders.value = s
+}
 function selectAll() {
   selected.value = new Set(documents.value.map(d => d.id))
 }
-function clearSel() { selected.value = new Set() }
+function clearSel() { selected.value = new Set(); selectedFolders.value = new Set() }
 
 // ───── folders ─────
 async function newFolder() {
@@ -176,7 +193,7 @@ async function deleteFolder(f: DocFolder) {
 // ───── bulk ─────
 async function bulkDelete() {
   if (!confirm(t('documents.delete_confirm'))) return
-  await documentsApi.bulk('delete', [...selected.value])
+  await documentsApi.bulk('delete', [...selected.value], { folder_ids: [...selectedFolders.value] })
   await loadListing()
   toast.success(t('documents.saved'))
 }
@@ -195,7 +212,7 @@ async function applyBulkTags() {
 }
 async function bulkDownload() {
   try {
-    await documentsApi.exportZip([...selected.value])
+    await documentsApi.exportZip([...selected.value], [...selectedFolders.value])
     toast.success(t('documents.export_started'))
     clearSel()
     await loadJobs()
@@ -205,6 +222,7 @@ async function bulkDownload() {
 }
 async function openMove() {
   moveTargetIds.value = [...selected.value]
+  moveTargetFolders.value = [...selectedFolders.value]
   try {
     allFolders.value = await documentsApi.allFolders()
   } catch {
@@ -213,11 +231,48 @@ async function openMove() {
   moveOpen.value = true
 }
 async function doMove(targetFolderId: number | null) {
-  await documentsApi.bulk('move', moveTargetIds.value, { folder_id: targetFolderId })
+  await documentsApi.bulk('move', moveTargetIds.value, { folder_id: targetFolderId, folder_ids: moveTargetFolders.value })
   moveOpen.value = false
   await loadListing()
   toast.success(t('documents.saved'))
 }
+
+// Cíl přesunu jako strom (z ploché allFolders přes parent_id) + zákaz neplatných cílů.
+const moveTreeFlat = computed<{ id: number; name: string; depth: number }[]>(() => {
+  const childrenOf = new Map<number | null, DocFolder[]>()
+  for (const f of allFolders.value) {
+    const key = f.parent_id ?? null
+    const arr = childrenOf.get(key) ?? []
+    arr.push(f); childrenOf.set(key, arr)
+  }
+  for (const arr of childrenOf.values()) arr.sort((a, b) => a.name.localeCompare(b.name, 'cs', { numeric: true }))
+  const out: { id: number; name: string; depth: number }[] = []
+  const seen = new Set<number>()
+  const walk = (parent: number | null, depth: number) => {
+    for (const f of childrenOf.get(parent) ?? []) {
+      if (seen.has(f.id)) continue
+      seen.add(f.id)
+      out.push({ id: f.id, name: f.name, depth })
+      walk(f.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  // Sirotci (rodič mimo aktivní strom) → na kořen, ať z nabídky nezmizí.
+  for (const f of allFolders.value) if (!seen.has(f.id)) { out.push({ id: f.id, name: f.name, depth: 0 }); seen.add(f.id) }
+  return out
+})
+// Zakázané cíle při přesunu složek: vybrané složky + jejich potomci (jinak cyklus).
+const forbiddenMoveTargets = computed<Set<number>>(() => {
+  const forbidden = new Set<number>()
+  if (moveTargetFolders.value.length === 0) return forbidden
+  const childrenOf = new Map<number, number[]>()
+  for (const f of allFolders.value) if (f.parent_id != null) {
+    const arr = childrenOf.get(f.parent_id) ?? []; arr.push(f.id); childrenOf.set(f.parent_id, arr)
+  }
+  const addSubtree = (id: number) => { forbidden.add(id); for (const c of childrenOf.get(id) ?? []) addSubtree(c) }
+  for (const id of moveTargetFolders.value) addSubtree(id)
+  return forbidden
+})
 
 // ───── trash ─────
 function toggleTrash() {
@@ -426,7 +481,10 @@ function walkEntry(entry: any, parentPath: string, out: { file: File; path: stri
   })
 }
 
-onMounted(() => { trashMode.value ? loadTrash() : loadListing(); loadJobs(); loadTags() })
+onMounted(() => {
+  canHover.value = window.matchMedia('(hover: hover)').matches
+  trashMode.value ? loadTrash() : loadListing(); loadJobs(); loadTags()
+})
 onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
 </script>
 
@@ -469,7 +527,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
     </div>
 
     <!-- Toolbar: search + view -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
       <div class="flex flex-wrap items-center gap-2">
         <div class="relative flex-1 min-w-48">
           <input
@@ -483,7 +541,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
         <select
           v-if="availableTags.length"
           :value="tagFilter"
-          class="cursor-pointer h-9 px-2 border border-neutral-300 rounded-md bg-white text-sm max-w-44"
+          class="cursor-pointer h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm max-w-44"
           @change="setTagFilter(($event.target as HTMLSelectElement).value)"
         >
           <option value="">{{ t('documents.all_tags') }}</option>
@@ -522,7 +580,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
 
     <!-- Background jobs (ZIP import / export) -->
     <div v-if="jobs.length" class="mb-4 space-y-2">
-      <div v-for="j in jobs" :key="j.id" class="bg-white border border-neutral-200 rounded-lg p-3">
+      <div v-for="j in jobs" :key="j.id" class="bg-surface border border-neutral-200 rounded-lg p-3">
         <div class="flex items-center gap-2 text-sm flex-wrap">
           <svg class="w-4 h-4 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path v-if="j.source === 'document_zip_import'" stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 4v12m-4-8l4-4 4 4" />
@@ -565,7 +623,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
       </div>
       <p v-if="!trashDocs.length && !trashFolders.length" class="text-sm text-neutral-400">{{ t('documents.trash_is_empty') }}</p>
       <ul class="space-y-1">
-        <li v-for="f in trashFolders" :key="'tf' + f.id" class="flex items-center gap-3 px-3 py-2 bg-white border border-neutral-200 rounded-lg">
+        <li v-for="f in trashFolders" :key="'tf' + f.id" class="flex items-center gap-3 px-3 py-2 bg-surface border border-neutral-200 rounded-lg">
           <svg class="w-5 h-5 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
           <span class="flex-1 text-sm text-neutral-700">{{ f.name }}</span>
           <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1 h-8 px-2.5 text-sm rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50" @click="restoreFolder(f)">
@@ -573,7 +631,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
             {{ t('documents.restore') }}
           </button>
         </li>
-        <li v-for="d in trashDocs" :key="'td' + d.id" class="flex items-center gap-3 px-3 py-2 bg-white border border-neutral-200 rounded-lg">
+        <li v-for="d in trashDocs" :key="'td' + d.id" class="flex items-center gap-3 px-3 py-2 bg-surface border border-neutral-200 rounded-lg">
           <span :class="['shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold', docTypeBadge(d.doc_type).class]">{{ docTypeBadge(d.doc_type).label }}</span>
           <span class="flex-1 text-sm text-neutral-700 truncate">{{ d.title }}</span>
           <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1 h-8 px-2.5 text-sm rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50" @click="restoreDoc(d)">
@@ -588,7 +646,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
     <div v-else-if="searchActive">
       <p v-if="!searching && searchResults.length === 0" class="text-sm text-neutral-400">{{ t('documents.search_no_results') }}</p>
       <ul class="space-y-1">
-        <li v-for="d in searchResults" :key="d.id" class="flex items-center gap-3 px-3 py-2 bg-white border border-neutral-200 rounded-lg hover:border-primary-300 cursor-pointer" @click="openDoc(d)">
+        <li v-for="d in searchResults" :key="d.id" class="flex items-center gap-3 px-3 py-2 bg-surface border border-neutral-200 rounded-lg hover:border-primary-300 cursor-pointer" @click="openDoc(d)">
           <span :class="['shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold', docTypeBadge(d.doc_type).class]">{{ docTypeBadge(d.doc_type).label }}</span>
           <span class="flex-1 min-w-0"><span class="block text-sm text-neutral-800 truncate">{{ d.title }}</span><span class="block text-xs text-neutral-400">{{ formatBytes(d.size_bytes) }} · {{ d.created_at.slice(0, 10) }}</span></span>
         </li>
@@ -631,19 +689,19 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
       <div v-if="selCount > 0" class="flex items-center gap-2 mb-3 px-3 py-2 bg-primary-50 border border-primary-200 rounded-lg text-sm flex-wrap">
         <span class="font-medium text-primary-700">{{ t('documents.selected', { n: selCount }) }}</span>
         <div class="flex-1"></div>
-        <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50" @click="openMove">
+        <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-surface text-neutral-700 hover:bg-neutral-50" @click="openMove">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM13 13l3-3m0 0l-3-3m3 3H8" /></svg>
           {{ t('documents.bulk_move') }}
         </button>
-        <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50" @click="bulkTag">
+        <button v-if="auth.canWrite && selDocCount > 0" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-surface text-neutral-700 hover:bg-neutral-50" @click="bulkTag">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 7h.01M7 3h5a2 2 0 0 1 1.414.586l7 7a2 2 0 0 1 0 2.828l-5 5a2 2 0 0 1-2.828 0l-7-7A2 2 0 0 1 5 8V5a2 2 0 0 1 2-2z" /></svg>
           {{ t('documents.bulk_tag') }}
         </button>
-        <button type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50" @click="bulkDownload">
+        <button type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-neutral-300 bg-surface text-neutral-700 hover:bg-neutral-50" @click="bulkDownload">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
           {{ t('documents.bulk_download') }}
         </button>
-        <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-danger-300 bg-white text-danger-500 hover:bg-danger-50" @click="bulkDelete">
+        <button v-if="auth.canWrite" type="button" class="cursor-pointer inline-flex items-center gap-1.5 h-8 px-2.5 text-sm font-medium rounded-md border border-danger-300 bg-surface text-danger-500 hover:bg-danger-50" @click="bulkDelete">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" /></svg>
           {{ t('documents.bulk_delete') }}
         </button>
@@ -659,21 +717,26 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
           <div
             v-for="f in folders"
             :key="f.id"
-            class="group flex items-center gap-2 px-3 py-2.5 bg-white border border-neutral-200 rounded-lg hover:border-primary-300 cursor-pointer"
+            :class="['group flex items-center gap-2 px-3 py-2.5 bg-surface border rounded-lg cursor-pointer', selectedFolders.has(f.id) ? 'border-primary-400 ring-2 ring-primary-100' : 'border-neutral-200 hover:border-primary-300']"
             @click="openFolder(f.id)"
           >
+            <input type="checkbox" class="shrink-0 cursor-pointer" :checked="selectedFolders.has(f.id)" @click.stop="toggleFolderSel(f.id)" />
             <svg class="w-5 h-5 text-warning-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             <span class="min-w-0 flex-1">
               <span class="block text-sm text-neutral-700 truncate">{{ f.name }}</span>
-              <span class="block text-xs text-neutral-400">
-                <template v-if="f.subfolder_count">{{ t('documents.folder_count', { n: f.subfolder_count }) }} · </template>{{ t('documents.file_count', { n: f.file_count }) }}
+              <span class="block text-xs text-neutral-400 truncate">
+                <template v-if="f.subfolder_count">{{ t('documents.folder_count', { n: f.subfolder_count }) }} · </template>{{ t('documents.file_count', { n: f.file_count }) }}<template v-if="f.total_bytes"> · {{ formatBytes(f.total_bytes) }}</template>
               </span>
             </span>
-            <span v-if="auth.canWrite" class="opacity-0 group-hover:opacity-100 flex items-center gap-1" @click.stop>
-              <button type="button" class="text-neutral-400 hover:text-primary-600" @click="renameFolder(f)" :title="t('documents.rename')">
+            <span
+              v-if="auth.canWrite"
+              :class="['flex items-center gap-1 transition-opacity', revealedFolderId === f.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100']"
+              @click.stop="revealFolderActions(f)"
+            >
+              <button type="button" :class="['text-neutral-400 hover:text-primary-600', (canHover || revealedFolderId === f.id) ? '' : 'pointer-events-none']" @click.stop="renameFolder(f)" :title="t('documents.rename')">
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828z" /></svg>
               </button>
-              <button type="button" class="text-neutral-400 hover:text-danger-500" @click="deleteFolder(f)" :title="t('documents.delete')">
+              <button type="button" :class="['text-neutral-400 hover:text-danger-500', (canHover || revealedFolderId === f.id) ? '' : 'pointer-events-none']" @click.stop="deleteFolder(f)" :title="t('documents.delete')">
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" /></svg>
               </button>
             </span>
@@ -691,11 +754,11 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
           <div
             v-for="d in sortedDocuments"
             :key="d.id"
-            :class="['relative group bg-white border rounded-lg overflow-hidden cursor-pointer', selected.has(d.id) ? 'border-primary-400 ring-2 ring-primary-100' : 'border-neutral-200 hover:border-primary-300']"
+            :class="['relative group bg-surface border rounded-lg overflow-hidden cursor-pointer', selected.has(d.id) ? 'border-primary-400 ring-2 ring-primary-100' : 'border-neutral-200 hover:border-primary-300']"
             @click="openDoc(d)"
           >
             <input type="checkbox" class="absolute top-2 left-2 z-10" :checked="selected.has(d.id)" @click.stop="toggleSel(d.id)" />
-            <div class="h-28 bg-neutral-50 flex items-center justify-center">
+            <div :class="['bg-neutral-50 flex items-center justify-center', d.has_thumb ? 'h-28' : 'h-14']">
               <img v-if="d.has_thumb" :src="documentsApi.thumbUrl(d.id)" class="w-full h-full object-cover" alt="" />
               <span v-else :class="['px-3 py-1.5 rounded text-sm font-bold', docTypeBadge(d.doc_type).class]">{{ docTypeBadge(d.doc_type).label }}</span>
             </div>
@@ -709,7 +772,7 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
         <!-- documents: list -->
         <table v-else-if="documents.length" class="w-full text-sm">
           <thead><tr class="text-left text-xs text-neutral-400 border-b border-neutral-200">
-            <th class="py-2 w-8"><input type="checkbox" :checked="selCount === documents.length && documents.length > 0" @change="selCount === documents.length ? clearSel() : selectAll()" /></th>
+            <th class="py-2 w-8"><input type="checkbox" :checked="selDocCount === documents.length && documents.length > 0" @change="selDocCount === documents.length ? clearSel() : selectAll()" /></th>
             <th class="py-2">
               <button type="button" class="cursor-pointer inline-flex items-center gap-1 hover:text-neutral-700" @click="setSort('name')">
                 {{ t('documents.name') }}
@@ -745,24 +808,40 @@ onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
 
     <!-- Drag overlay -->
     <div v-if="dragOver && auth.canWrite" class="fixed inset-0 z-40 bg-primary-500/10 border-4 border-dashed border-primary-400 flex items-center justify-center pointer-events-none">
-      <span class="px-4 py-2 bg-white rounded-lg shadow text-primary-700 font-medium">{{ t('documents.drop_here') }}</span>
+      <span class="px-4 py-2 bg-surface rounded-lg shadow text-primary-700 font-medium">{{ t('documents.drop_here') }}</span>
     </div>
 
     <!-- Move modal -->
     <div v-if="moveOpen" class="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" @click.self="moveOpen = false">
-      <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-4 max-h-[70vh] overflow-auto">
-        <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('documents.bulk_move') }}</h3>
-        <ul class="space-y-1">
-          <li><button type="button" class="w-full text-left px-3 py-2 rounded hover:bg-neutral-50 text-sm" @click="doMove(null)">/ {{ t('documents.root') }}</button></li>
-          <li v-for="f in allFolders" :key="f.id"><button type="button" class="w-full text-left px-3 py-2 rounded hover:bg-neutral-50 text-sm" @click="doMove(f.id)">{{ f.name }}</button></li>
+      <div class="bg-surface rounded-lg shadow-xl max-w-md w-full p-4 max-h-[70vh] overflow-auto">
+        <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('documents.bulk_move') }} · {{ t('documents.selected', { n: selCount }) }}</h3>
+        <ul class="space-y-0.5">
+          <li>
+            <button type="button" class="cursor-pointer w-full text-left px-3 py-2 rounded hover:bg-neutral-50 text-sm inline-flex items-center gap-1.5" @click="doMove(null)">
+              <svg class="w-4 h-4 text-neutral-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12l9-9 9 9M5 10v10h14V10" /></svg>
+              {{ t('documents.root') }}
+            </button>
+          </li>
+          <li v-for="f in moveTreeFlat" :key="f.id">
+            <button
+              type="button"
+              :disabled="forbiddenMoveTargets.has(f.id)"
+              :style="{ paddingLeft: (f.depth * 18 + 12) + 'px' }"
+              class="w-full text-left pr-3 py-2 rounded text-sm inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed enabled:cursor-pointer enabled:hover:bg-neutral-50"
+              @click="doMove(f.id)"
+            >
+              <svg class="w-4 h-4 text-warning-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <span class="truncate">{{ f.name }}</span>
+            </button>
+          </li>
         </ul>
       </div>
     </div>
 
     <!-- Bulk tag modal (našeptávání tagů) -->
     <div v-if="tagModalOpen" class="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" @click.self="tagModalOpen = false">
-      <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-4">
-        <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('documents.bulk_tag') }} · {{ t('documents.selected', { n: selCount }) }}</h3>
+      <div class="bg-surface rounded-lg shadow-xl max-w-md w-full p-4">
+        <h3 class="text-sm font-medium text-neutral-700 mb-3">{{ t('documents.bulk_tag') }} · {{ t('documents.selected', { n: selDocCount }) }}</h3>
         <TagInput v-model="bulkTags" :autofocus="true" />
         <div class="flex justify-end gap-2 mt-4">
           <button type="button" class="cursor-pointer h-9 px-3 text-sm rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50" @click="tagModalOpen = false">{{ t('documents.cancel_job') }}</button>

@@ -10,6 +10,7 @@ export interface DocFolder {
   created_at: string
   subfolder_count: number
   file_count: number
+  total_bytes: number
 }
 
 export interface DocLink {
@@ -200,8 +201,8 @@ export const documentsApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)
   },
-  exportZip: (ids: number[]) =>
-    api.post<{ job_id: number; status: string }>('/documents/export', { ids }).then(r => r.data),
+  exportZip: (ids: number[], folderIds: number[] = []) =>
+    api.post<{ job_id: number; status: string }>('/documents/export', { ids, folder_ids: folderIds }).then(r => r.data),
   // Chunkovaný upload (obchází PHP post_max_size) — velký ZIP / složka / velký soubor
   uploadStart: (mode: 'zip-explode' | 'folder' | 'single', folderId: number | null, name?: string) =>
     api.post<{ job_id: number; mode: string }>('/documents/upload/start', {

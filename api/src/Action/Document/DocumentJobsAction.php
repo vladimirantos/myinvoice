@@ -91,7 +91,7 @@ final class DocumentJobsAction
         return Json::ok($response, ['job_id' => $jobId, 'status' => 'queued']);
     }
 
-    /** POST /api/documents/export {ids[]} — sestav ZIP na pozadí. */
+    /** POST /api/documents/export {ids[], folder_ids[]} — sestav ZIP na pozadí (složky se strukturou). */
     public function export(Request $request, Response $response): Response
     {
         $sid = $this->supplierId($request);
@@ -100,15 +100,19 @@ final class DocumentJobsAction
 
         $body = (array) $request->getParsedBody();
         $ids = array_values(array_filter(array_map('intval', (array) ($body['ids'] ?? []))));
-        if ($ids === []) return Json::error($response, 'no_ids', 'Nebyly vybrány žádné dokumenty.', 400);
+        $folderIds = array_values(array_filter(array_map('intval', (array) ($body['folder_ids'] ?? []))));
+        if ($ids === [] && $folderIds === []) {
+            return Json::error($response, 'no_ids', 'Nebyly vybrány žádné položky.', 400);
+        }
 
-        $jobId = $this->jobs->create($sid, 'document_zip_export', ['ids' => $ids], $userId ?? 0);
+        $jobId = $this->jobs->create($sid, 'document_zip_export', ['ids' => $ids, 'folder_ids' => $folderIds], $userId ?? 0);
         if ($this->jobSourceMissing($jobId, $sid, 'document_zip_export')) {
             return $this->migrationError($response);
         }
         $this->spawnWorker($jobId);
         $this->logger->log('document.zip_export_started', $userId, 'document', null,
-            ['job_id' => $jobId, 'count' => count($ids)], $this->clientIp($request), $request->getHeaderLine('User-Agent'), $sid);
+            ['job_id' => $jobId, 'count' => count($ids), 'folders' => count($folderIds)],
+            $this->clientIp($request), $request->getHeaderLine('User-Agent'), $sid);
 
         return Json::ok($response, ['job_id' => $jobId, 'status' => 'queued']);
     }

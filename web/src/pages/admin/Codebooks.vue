@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { settingsApi, type VatRate, type Country, type CurrencyAccount, type Unit } from '@/api/settings'
 import { suppliersApi, type SupplierListItem, type SupplierCreatePayload } from '@/api/suppliers'
 import { expenseCategoriesApi, type ExpenseCategory } from '@/api/expenseCategories'
+import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { vatClassificationsApi, type VatClassification } from '@/api/vatClassifications'
 import { clientsApi } from '@/api/clients'
 import { useSupplierStore } from '@/stores/supplier'
@@ -16,7 +17,7 @@ const toast = useToast()
 const supplierStore = useSupplierStore()
 const auth = useAuthStore()
 
-type Tab = 'suppliers' | 'currencies' | 'vat' | 'countries' | 'units' | 'expense_categories' | 'vat_classifications'
+type Tab = 'suppliers' | 'currencies' | 'vat' | 'countries' | 'units' | 'expense_categories' | 'revenue_categories' | 'vat_classifications'
 const tab = ref<Tab>('suppliers')
 
 const currencies = ref<CurrencyAccount[]>([])
@@ -377,6 +378,66 @@ async function removeExpense(c: ExpenseCategory) {
   }
 }
 
+// ─── Revenue categories (kategorie tržeb pro CRM/Stats rozpad) ─────────
+const revenueCategories = ref<RevenueCategory[]>([])
+const revenueDraft = reactive({
+  id: 0,
+  code: '',
+  label: '',
+  display_order: 0,
+  archived: false,
+})
+const revenueOpen = ref(false)
+
+async function loadRevenueCategories() {
+  revenueCategories.value = await revenueCategoriesApi.list(true)
+}
+
+function newRevenue() {
+  Object.assign(revenueDraft, { id: 0, code: '', label: '', display_order: 0, archived: false })
+  revenueOpen.value = true
+}
+
+function editRevenue(c: RevenueCategory) {
+  Object.assign(revenueDraft, c)
+  revenueOpen.value = true
+}
+
+async function saveRevenue() {
+  try {
+    if (revenueDraft.id) {
+      await revenueCategoriesApi.update(revenueDraft.id, {
+        code: revenueDraft.code,
+        label: revenueDraft.label,
+        display_order: revenueDraft.display_order,
+        archived: revenueDraft.archived,
+      })
+    } else {
+      await revenueCategoriesApi.create({
+        code: revenueDraft.code,
+        label: revenueDraft.label,
+        display_order: revenueDraft.display_order,
+      })
+    }
+    revenueOpen.value = false
+    toast.success(t('common.saved'))
+    await loadRevenueCategories()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
+async function removeRevenue(c: RevenueCategory) {
+  if (!confirm(t('revenue_categories.delete_confirm', { label: c.label }))) return
+  try {
+    const r = await revenueCategoriesApi.delete(c.id)
+    toast.success(r.deleted ? t('common.deleted') : t('revenue_categories.archived_due_to_usage'))
+    await loadRevenueCategories()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
 // ─── VAT classifications (kódy DPHDP3 + KH) ──────────────────────────
 const vatClassifications = ref<VatClassification[]>([])
 const vatClsDraft = reactive({
@@ -465,9 +526,10 @@ async function removeVatCls(c: VatClassification) {
   }
 }
 
-// Načti při přepnutí na tab=expense_categories / vat_classifications
+// Načti při přepnutí na tab=expense_categories / revenue_categories / vat_classifications
 watch(tab, (newTab) => {
   if (newTab === 'expense_categories') loadExpenseCategories()
+  if (newTab === 'revenue_categories') loadRevenueCategories()
   if (newTab === 'vat_classifications') loadVatClassifications()
 })
 </script>
@@ -481,7 +543,7 @@ watch(tab, (newTab) => {
 
     <!-- Tabs — Dodavatelé jako první volba (multi-tenant firmy embed do Codebooks) -->
     <div class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
-      <button v-for="tt in (['suppliers', 'currencies', 'vat', 'vat_classifications', 'expense_categories', 'countries', 'units'] as const)" :key="tt"
+      <button v-for="tt in (['suppliers', 'currencies', 'vat', 'vat_classifications', 'expense_categories', 'revenue_categories', 'countries', 'units'] as const)" :key="tt"
         @click="tab = tt"
         class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap"
         :class="tab === tt
@@ -492,6 +554,7 @@ watch(tab, (newTab) => {
           : tt === 'vat' ? t('codebooks.tab_vat')
           : tt === 'vat_classifications' ? t('codebooks.tab_vat_classifications')
           : tt === 'expense_categories' ? t('codebooks.tab_expense_categories')
+          : tt === 'revenue_categories' ? t('codebooks.tab_revenue_categories')
           : tt === 'countries' ? t('codebooks.tab_countries')
           : t('codebooks.tab_units') }}
       </button>
@@ -510,7 +573,7 @@ watch(tab, (newTab) => {
       </div>
 
       <!-- Desktop tabulka -->
-      <div class="hidden md:block bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="hidden md:block bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full text-sm table-sticky-first">
             <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
@@ -557,7 +620,7 @@ watch(tab, (newTab) => {
       </div>
 
       <!-- Mobile karty -->
-      <div class="md:hidden bg-white border border-neutral-200 rounded-lg shadow-sm divide-y divide-neutral-100 overflow-hidden">
+      <div class="md:hidden bg-surface border border-neutral-200 rounded-lg shadow-sm divide-y divide-neutral-100 overflow-hidden">
         <div v-for="s in suppliers" :key="`m-${s.id}`" class="px-4 py-3">
           <div class="flex items-baseline justify-between gap-2">
             <div class="font-medium text-neutral-900 flex items-center gap-1.5 min-w-0 truncate">
@@ -595,7 +658,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_currency') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -687,7 +750,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_vat') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -766,7 +829,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_country') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -836,7 +899,7 @@ watch(tab, (newTab) => {
           {{ t('codebooks.new_unit') }}
         </button>
       </div>
-      <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <!-- Desktop: tabulka -->
         <div class="hidden md:block overflow-x-auto">
         <table class="w-full text-sm table-sticky-first">
@@ -905,11 +968,11 @@ watch(tab, (newTab) => {
         </button>
       </div>
 
-      <div v-if="expenseCategories.length === 0" class="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+      <div v-if="expenseCategories.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
         {{ t('expense_categories.empty') }}
       </div>
 
-      <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
             <tr>
@@ -947,6 +1010,53 @@ watch(tab, (newTab) => {
       </div>
     </section>
 
+    <!-- ====== REVENUE CATEGORIES (kategorie tržeb) ====== -->
+    <section v-else-if="tab === 'revenue_categories'">
+      <div class="flex justify-between mb-3 gap-2">
+        <p class="text-sm text-neutral-500">{{ t('revenue_categories.hint') }}</p>
+        <button @click="newRevenue"
+          class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+          {{ t('revenue_categories.new') }}
+        </button>
+      </div>
+
+      <div v-if="revenueCategories.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+        {{ t('revenue_categories.empty') }}
+      </div>
+
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+            <tr>
+              <th class="px-3 py-2 text-left font-medium w-24">{{ t('revenue_categories.code') }}</th>
+              <th class="px-3 py-2 text-left font-medium">{{ t('revenue_categories.label') }}</th>
+              <th class="px-3 py-2 text-right font-medium w-24">{{ t('revenue_categories.usage') }}</th>
+              <th class="px-3 py-2 w-40"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-100">
+            <tr v-for="c in revenueCategories" :key="c.id" :class="['hover:bg-neutral-50', c.archived ? 'opacity-50' : '']">
+              <td class="px-3 py-2 font-mono text-xs">{{ c.code }}</td>
+              <td class="px-3 py-2">
+                {{ c.label }}
+                <span v-if="c.archived" class="ml-2 text-xs px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-500">{{ t('revenue_categories.archived') }}</span>
+              </td>
+              <td class="px-3 py-2 text-right font-mono text-xs text-neutral-600">{{ c.invoices_count || 0 }}</td>
+              <td class="px-3 py-2 text-right text-xs">
+                <button @click="editRevenue(c)" class="cursor-pointer text-primary-600 hover:text-primary-700 mr-3">
+                  {{ t('common.edit') }}
+                </button>
+                <button @click="removeRevenue(c)" class="cursor-pointer text-danger-500 hover:text-danger-600">
+                  {{ t('common.delete') }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- ====== VAT CLASSIFICATIONS ====== -->
     <section v-else-if="tab === 'vat_classifications'">
       <div class="flex justify-between mb-3 gap-2">
@@ -958,11 +1068,11 @@ watch(tab, (newTab) => {
         </button>
       </div>
 
-      <div v-if="vatClassifications.length === 0" class="bg-white border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
+      <div v-if="vatClassifications.length === 0" class="bg-surface border border-dashed border-neutral-300 rounded-lg p-8 text-center text-sm text-neutral-500">
         {{ t('vat_classifications.empty') }}
       </div>
 
-      <div v-else class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <div v-else class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <table class="w-full text-sm">
           <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
             <tr>
@@ -1015,8 +1125,8 @@ watch(tab, (newTab) => {
     <!-- ====== Modals ====== -->
 
     <!-- VAT classification modal -->
-    <div v-if="vatClsOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-xl w-full p-5">
+    <div v-if="vatClsOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-xl w-full p-5">
         <h3 class="text-lg font-semibold mb-3">
           {{ vatClsEditMode === 'edit' ? t('vat_classifications.edit_title') : t('vat_classifications.new_title') }}
         </h3>
@@ -1030,7 +1140,7 @@ watch(tab, (newTab) => {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('vat_classifications.direction') }}</label>
-              <select v-model="vatClsDraft.direction" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="vatClsDraft.direction" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option value="sale">{{ t('vat_classifications.direction_sale') }}</option>
                 <option value="purchase">{{ t('vat_classifications.direction_purchase') }}</option>
                 <option value="both">{{ t('vat_classifications.direction_both') }}</option>
@@ -1081,8 +1191,8 @@ watch(tab, (newTab) => {
     </div>
 
     <!-- Expense category modal -->
-    <div v-if="expenseOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="expenseOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">
           {{ expenseDraft.id ? t('expense_categories.edit_title') : t('expense_categories.new_title') }}
         </h3>
@@ -1100,7 +1210,7 @@ watch(tab, (newTab) => {
           </div>
           <div>
             <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('expense_categories.fixed_or_var') }}</label>
-            <select v-model="expenseDraft.fixed_or_var" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+            <select v-model="expenseDraft.fixed_or_var" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
               <option value="variable">{{ t('expense_categories.variable') }}</option>
               <option value="fixed">{{ t('expense_categories.fixed') }}</option>
             </select>
@@ -1122,9 +1232,44 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
+    <!-- Revenue category modal -->
+    <div v-if="revenueOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
+        <h3 class="text-lg font-semibold mb-3">
+          {{ revenueDraft.id ? t('revenue_categories.edit_title') : t('revenue_categories.new_title') }}
+        </h3>
+        <div class="space-y-3">
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.code') }} *</label>
+            <input v-model="revenueDraft.code" type="text" maxlength="20" placeholder="konzultace"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <p class="text-xs text-neutral-500 mt-1">{{ t('revenue_categories.code_hint') }}</p>
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.label') }} *</label>
+            <input v-model="revenueDraft.label" type="text" maxlength="100" placeholder="Konzultace a poradenství"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('revenue_categories.display_order') }}</label>
+            <input v-model.number="revenueDraft.display_order" type="number" step="1"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+          </div>
+          <label v-if="revenueDraft.id" class="flex items-center gap-2 text-sm">
+            <input v-model="revenueDraft.archived" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+            {{ t('revenue_categories.archive') }}
+          </label>
+        </div>
+        <div class="flex justify-end gap-2 pt-4 mt-3 border-t border-neutral-200">
+          <button @click="revenueOpen = false" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+          <button @click="saveRevenue" class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md">{{ t('common.save') }}</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Supplier create modal (multi-tenant firma) -->
-    <div v-if="supplierCreateOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-xl w-full p-5">
+    <div v-if="supplierCreateOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-xl w-full p-5">
         <h3 class="text-lg font-semibold mb-1">{{ t('supplier.create_title') }}</h3>
         <p class="text-xs text-neutral-500 mb-4">{{ t('supplier.create_hint') }}</p>
         <form @submit.prevent="saveSupplier">
@@ -1183,8 +1328,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="currencyOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="currencyOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ currencyDraft._new ? t('codebooks.new_currency') : t('settings.edit_currency', { code: currencyDraft.code }) }}</h3>
         <div class="space-y-3">
           <div class="grid grid-cols-3 gap-3" v-if="currencyDraft._new">
@@ -1232,8 +1377,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="vatOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="vatOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ vatDraft._new ? t('codebooks.new_vat') : vatDraft.code }}</h3>
         <div class="space-y-3">
           <div class="grid grid-cols-3 gap-3">
@@ -1270,8 +1415,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="unitOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="unitOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ unitDraft._new ? t('codebooks.new_unit') : unitDraft.code }}</h3>
         <div class="space-y-3">
           <div>
@@ -1301,8 +1446,8 @@ watch(tab, (newTab) => {
       </div>
     </div>
 
-    <div v-if="countryOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="countryOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ countryDraft._new ? t('codebooks.new_country') : countryDraft.iso2 }}</h3>
         <div class="space-y-3">
           <div class="grid grid-cols-2 gap-3">

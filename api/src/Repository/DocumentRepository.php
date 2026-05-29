@@ -97,6 +97,27 @@ final class DocumentRepository
         return array_map([$this, 'hydrate'], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
     }
 
+    /**
+     * Surové řádky aktivních top-level dokumentů v dané sadě složek — pro strukturovaný
+     * ZIP export (potřebujeme folder_id k rekonstrukci stromu + sha/filename k souboru).
+     *
+     * @param int[] $folderIds
+     * @return list<array{id:int,folder_id:int,sha256:string,filename:string,original_name:string}>
+     */
+    public function rawByFolderIds(int $supplierId, array $folderIds): array
+    {
+        $folderIds = array_values(array_filter(array_map('intval', $folderIds), static fn(int $v): bool => $v > 0));
+        if ($folderIds === []) return [];
+        $in = implode(',', array_fill(0, count($folderIds), '?'));
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT id, folder_id, sha256, filename, original_name FROM documents
+              WHERE supplier_id = ? AND deleted_at IS NULL AND parent_document_id IS NULL
+                AND folder_id IN ($in)"
+        );
+        $stmt->execute(array_merge([$supplierId], $folderIds));
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
     /** Přílohy ZFO kontejneru. @return list<array<string,mixed>> */
     public function listChildren(int $parentId, int $supplierId): array
     {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { invoicesApi, type Invoice, type WorkReport, type ApprovalStatus, type InvoiceAttachment } from '@/api/invoices'
@@ -147,6 +147,9 @@ function formatBytes(n: number): string {
 }
 
 onMounted(load)
+// Detail se recykluje při navigaci /invoices/:id → :id (proklik na související doklad,
+// dobropis/parent) → onMounted se znovu nespustí, proto přenačtení řídí watch.
+watch(() => route.params.id, load)
 
 function actionLabel(a: string): string {
   const map: Record<string, string> = {
@@ -772,8 +775,8 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Mark paid modal -->
-    <div v-if="markPaidOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-sm w-full p-5">
+    <div v-if="markPaidOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-sm w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('invoice.modals.mark_paid_title') }}</h3>
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.mark_paid_date') }}</label>
         <input v-model="paidAtInput" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
@@ -788,8 +791,8 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Cancel modal -->
-    <div v-if="cancelOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="cancelOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ isCreditNoteSource ? t('invoice.modals.cancel_title_cn') : t('invoice.modals.cancel_title') }}</h3>
         <p class="text-sm text-neutral-600 mb-3">{{ t('invoice.modals.cancel_choose') }}</p>
         <div class="space-y-2 mb-4">
@@ -840,8 +843,8 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Send modal -->
-    <div v-if="sendOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="sendOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('invoice.modals.send_title') }}</h3>
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.send_recipients') }}</label>
         <input v-model="sendTo" type="text" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-2 text-sm" />
@@ -862,8 +865,8 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Reminder modal -->
-    <div v-if="reminderOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="reminderOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-1">{{ t('invoice.modals.reminder_title') }}</h3>
         <p class="text-sm text-warning-600 font-medium mb-3">{{ t('invoice.modals.reminder_overdue', { days: daysOverdue }) }}</p>
         <p class="text-sm text-neutral-600 mb-3">{{ t('invoice.modals.reminder_body') }}</p>
@@ -887,8 +890,22 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
+    <!-- Cross-link na související doklad: proforma → vystavený daňový doklad; doklad → rodič -->
+    <RouterLink v-if="isProforma && invoice.final_invoice"
+      :to="`/invoices/${invoice.final_invoice.id}`"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm hover:bg-primary-100 transition mb-4">
+      <span class="text-primary-700">{{ t('invoice.linked.final_invoice') }}</span>
+      <span class="font-medium text-primary-700 font-mono">{{ invoice.final_invoice.varsymbol || `#${invoice.final_invoice.id}` }} →</span>
+    </RouterLink>
+    <RouterLink v-if="invoice.parent_invoice"
+      :to="`/invoices/${invoice.parent_invoice.id}`"
+      class="flex items-center justify-between gap-3 bg-primary-50 border border-primary-200 rounded-lg px-4 py-2.5 text-sm hover:bg-primary-100 transition mb-4">
+      <span class="text-primary-700">{{ invoice.parent_invoice.invoice_type === 'proforma' ? t('invoice.linked.proforma') : t('invoice.linked.parent') }}</span>
+      <span class="font-medium text-primary-700 font-mono">{{ invoice.parent_invoice.varsymbol || `#${invoice.parent_invoice.id}` }} →</span>
+    </RouterLink>
+
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           {{ t('invoice.issue_date') }}
           <template v-if="!isProforma"> / {{ t('invoice.tax_date') }}</template>
@@ -902,7 +919,7 @@ async function updateApprovalStatus() {
         </dl>
       </div>
 
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('common.currency') }} &amp; {{ t('invoice.totals.vat') }}</h3>
         <dl class="space-y-1.5 text-sm">
           <div class="flex justify-between"><dt class="text-neutral-500">{{ t('common.currency') }}</dt><dd class="font-mono">{{ invoice.currency }}</dd></div>
@@ -915,7 +932,7 @@ async function updateApprovalStatus() {
         </dl>
       </div>
 
-      <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('settings.account_cz') }}</h3>
         <dl v-if="(invoice.payment_method ?? 'bank_transfer') === 'bank_transfer'" class="space-y-1 text-sm">
           <div v-if="invoice.bank_account_number" class="font-mono text-xs">
@@ -934,7 +951,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Položky -->
-    <div class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <div class="px-5 py-3 border-b border-neutral-200">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.items') }}</h3>
       </div>
@@ -991,7 +1008,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Sumace -->
-    <div class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.summary') }}</h3>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <dl class="space-y-1 text-sm">
@@ -1039,7 +1056,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- CZK přepočet pro faktury v cizí měně -->
-    <div v-if="invoice.czk_recap" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice.czk_recap" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-3">
         {{ t('invoice.czk_recap.title') }}
       </h3>
@@ -1081,14 +1098,22 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
-    <div v-if="invoice.note_below_items" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice.note_below_items" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-2">{{ t('invoice.note') }}</h3>
       <p class="text-sm text-neutral-700 whitespace-pre-wrap">{{ invoice.note_below_items }}</p>
     </div>
 
+    <div v-if="invoice.revenue_category_label" class="bg-surface border border-neutral-200 rounded-lg px-5 py-3 shadow-sm flex items-center justify-between text-sm">
+      <span class="text-neutral-500">{{ t('invoice.classification.revenue_category') }}</span>
+      <span class="font-medium text-neutral-900">
+        {{ invoice.revenue_category_label }}
+        <span class="text-neutral-400">({{ invoice.revenue_category_code }})</span>
+      </span>
+    </div>
+
 
     <!-- Výkaz víceprací -->
-    <div v-if="workReport" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="workReport" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <header class="px-5 py-3 border-b border-neutral-200 flex items-baseline justify-between gap-3">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report') }}</h3>
         <span class="text-sm text-neutral-700">{{ workReport.title }}</span>
@@ -1147,7 +1172,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Stav schválení výkazu — viditelné jen pokud projekt vyžaduje + výkaz existuje -->
-    <div v-if="requiresApproval" class="bg-white border border-neutral-200 rounded-lg shadow-sm">
+    <div v-if="requiresApproval" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <header class="px-5 py-3 border-b border-neutral-200">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.approval.section_title') }}</h3>
       </header>
@@ -1212,8 +1237,8 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Approval status modal (admin) -->
-    <div v-if="approvalStatusOpen" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="approvalStatusOpen" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('invoice.approval.modal_title') }}</h3>
         <p class="text-sm text-neutral-600 mb-3">{{ t('invoice.approval.modal_hint') }}</p>
         <div class="space-y-2 mb-4">
@@ -1252,7 +1277,7 @@ async function updateApprovalStatus() {
 
     <!-- Přílohy emailu (PDF/Office/obrázky se přibalí při odeslání faktury) -->
     <div v-if="invoice && attachmentsAvailable(invoice)"
-         class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+         class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <div>
           <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">
@@ -1323,7 +1348,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Historie PDF -->
-    <div v-if="pdfHistory.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="pdfHistory.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <header class="px-5 py-3 border-b border-neutral-200 flex items-center justify-between">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.pdf_history.title') }}</h3>
         <span class="text-xs text-neutral-400">{{ pdfHistory.length }}</span>
@@ -1354,7 +1379,7 @@ async function updateApprovalStatus() {
     </div>
 
     <!-- Aktivita -->
-    <div v-if="activity.length > 0" class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+    <div v-if="activity.length > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <header class="px-5 py-3 border-b border-neutral-200">
         <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.activity') }}</h3>
       </header>
@@ -1381,7 +1406,7 @@ async function updateApprovalStatus() {
     <!-- Sekundární akce — pod fakturou (Test odeslání + admin/destrukční).
          Pro draft zobrazujeme kvůli „Test odeslání" + odkazu na klienta;
          vnitřní tlačítka mají vlastní v-if podmínky. -->
-    <div v-if="invoice" class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+    <div v-if="invoice" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
       <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.more_actions') }}</h3>
       <div class="flex flex-wrap gap-2">
         <RouterLink :to="`/clients/${invoice.client_id}`"

@@ -39,7 +39,7 @@ COPY --from=mlocati/php-extension-installer:latest /usr/bin/install-php-extensio
 RUN install-php-extensions \
         pdo_mysql gd mbstring intl zip opcache exif bcmath redis \
  && apt-get update \
- && apt-get install -y --no-install-recommends tini librsvg2-bin mariadb-client \
+ && apt-get install -y --no-install-recommends tini cron librsvg2-bin mariadb-client \
  && a2enmod rewrite headers deflate expires \
  && rm -f /etc/apache2/mods-enabled/mpm_* \
  && a2enmod mpm_prefork \
@@ -86,6 +86,14 @@ COPY --from=php-deps  --chown=www-data:www-data /app/vendor ./api/vendor
 RUN php tools/generateManualHtml.php \
  && php tools/exportManualToPdf.php \
  && chown -R www-data:www-data manual/generated manual/manual.pdf
+
+# Vestavěný cron (volitelný, MYINVOICE_ENABLE_CRON=1 default). Wrapper + crontab
+# generovaný z CronCatalog (jediný zdroj pravdy — viz tools/generateDockerCrontab.php),
+# takže obsahuje všechny úlohy + frekvence z UI „Plánované úlohy". Daemon pouští entrypoint.
+RUN cp docker/cron-run.sh /usr/local/bin/myinvoice-cron-run \
+ && chmod 0755 /usr/local/bin/myinvoice-cron-run \
+ && php tools/generateDockerCrontab.php > /etc/cron.d/myinvoice \
+ && chmod 0644 /etc/cron.d/myinvoice
 
 # Stub cfg.php — image je samostatný a `/var/www/html` může běžet jako read-only.
 # Veškerou konfiguraci lze předat přes ENV (viz api/src/Infrastructure/Config/Config.php).

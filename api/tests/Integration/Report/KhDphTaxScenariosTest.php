@@ -131,8 +131,10 @@ final class KhDphTaxScenariosTest extends TestCase
         $this->sale('2099060003', $custNoDic, '1', false, $d(12), $d(12), [[30000, 6300, 21]]);
         // S4 oddíl C: vývoz (kód 26 → ř.22 pln_vyvoz) — issue #35 #2
         $this->sale('2099060004', $euCust, '26', false, $d(13), $d(13), [[50000, 0, 0]]);
-        // S5 A.1: reverse charge dodavatel (samovyměří odběratel) — RC sleva sazby na 0
-        $this->sale('2099060005', $custDic, null, true, $d(14), $d(14), [[15000, 0, 0]]);
+        // S5 A.1: reverse charge dodavatel (samovyměří odběratel). RC model: položka drží
+        // NOMINÁLNÍ sazbu 21 %, daň = 0 (příznak reverse_charge ji vynuluje). Musí spadnout
+        // do A.1 / ř.25 (PDP uskutečněná), NE do ř.1 výstupu — i přes snapshot 21.
+        $this->sale('2099060005', $custDic, null, true, $d(14), $d(14), [[15000, 0, 21]]);
 
         // ── PŘIJATÉ (purchases) ──────────────────────────────────────────────
         // P1 B.2: tuzemská 21 % nad limit, dodavatel s DIČ
@@ -203,6 +205,12 @@ final class KhDphTaxScenariosTest extends TestCase
         // Oddíl C / Veta2 ř.22 vývoz (S4) — dříve se negeneroval vůbec (review #2)
         $this->assertNotNull($v2, 'Veta2 (oddíl C) musí existovat');
         $this->assertSame('50000', (string) $v2['pln_vyvoz'], 'ř.22 vývoz = 50000 (S4)');
+
+        // ř.25 tuzemský PDP dodavatel §92 (S5 — tuzemský RC odběratel). Country-aware klasifikace:
+        // tuzemský RC → kód '25s' → ř.25 (pln_rez_pren), NE ř.20 (dod_zb, to je dodání do JČS pro EU).
+        // Základ 15000, žádná výstupní daň (nominální sazba 21 % na RC negeneruje daň).
+        $this->assertSame('15000', (string) $v2['pln_rez_pren'], 'ř.25 tuzemský PDP dodavatel = 15000 (S5)');
+        $this->assertEmpty((string) $v2['dod_zb'], 'ř.20 musí být prázdné — S5 je tuzemský RC (§92a), ne dodání do JČS');
 
         // ř.3 pořízení zboží z JČS (P4) + samovyměřená daň
         $this->assertSame('8000', (string) $v1['p_zb23']);
@@ -472,6 +480,30 @@ final class KhDphTaxScenariosTest extends TestCase
         $kh = new \SimpleXMLElement($this->kh->build($this->supplierId, self::YEAR, self::MONTH)['xml']);
         $this->assertCount(0, $kh->DPHKH1->VetaA4, 'osvobozený prodej nepatří do A.4');
         $this->assertCount(0, $kh->DPHKH1->VetaA5, 'osvobozený prodej nepatří do A.5 (sumace)');
+    }
+
+    /**
+     * Country-aware RC klasifikace vystavených plnění (fix 2026-05-29): příznak reverse_charge
+     * se klasifikuje podle ZEMĚ odběratele —
+     *   • tuzemský odběratel (CZ) → tuzemský §92a dodavatel → kód '25s' → DPHDP3 ř.25 (pln_rez_pren)
+     *   • zahraniční EU odběratel  → dodání zboží do JČS    → kód '20'  → DPHDP3 ř.20 (dod_zb)
+     * Dříve oba končily na '20'/ř.20 → tuzemský RC (stavební práce ap.) se chybně vykázal jako
+     * dodání do EU. Ani jeden nepřidává výstupní daň (ř.1).
+     */
+    public function testReverseChargeClassifiedByCustomerCountry(): void
+    {
+        $d = fn (int $day) => sprintf('%04d-%02d-%02d', self::YEAR, self::MONTH, $day);
+        $czCust = $this->client('Tuzemský RC odběratel', $this->czId, 'CZ70707075', customer: true);
+        $euCust = $this->client('EU RC odběratel',       $this->skId, 'SK7070707',  customer: true);
+
+        // Oba reverse_charge, BEZ ručního kódu → auto-klasifikace podle země odběratele.
+        $this->sale('2099069001', $czCust, null, true, $d(10), $d(10), [[12000, 0, 21]]);
+        $this->sale('2099069002', $euCust, null, true, $d(11), $d(11), [[34000, 0, 0]]);
+
+        $dp = (new \SimpleXMLElement($this->dph->build($this->supplierId, self::YEAR, self::MONTH, 'monthly')['xml']))->DPHDP3;
+        $this->assertSame('12000', (string) $dp->Veta2['pln_rez_pren'], 'tuzemský RC → ř.25 (pln_rez_pren)');
+        $this->assertSame('34000', (string) $dp->Veta2['dod_zb'],       'EU RC → ř.20 (dod_zb)');
+        $this->assertSame('', (string) $dp->Veta1['obrat23'], 'RC plnění nepatří do ř.1 (výstupní daň)');
     }
 
     /**

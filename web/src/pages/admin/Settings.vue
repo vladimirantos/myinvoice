@@ -27,6 +27,43 @@ function validateAndPreview(template: string | null) {
   if (!hasCounterPlaceholder(tmpl)) return { error: t('settings.numbering_must_have_counter'), preview: '' }
   return { error: '', preview: renderVarsymbolTemplate(tmpl, new Date(), 1) }
 }
+// Výchozí splatnost — UI preset ('7' / '14' / 'month' / 'custom') je odvozen z dvojice
+// (default_payment_due_days, default_payment_due_unit). 'month' znamená přesně 1 kalendářní
+// měsíc (days=1, unit='month'); 'custom' nechá volný číselný input v dnech.
+type DuePreset = '7' | '14' | 'month' | 'custom'
+// 'custom' musí být „sticky" i když hodnota náhodou odpovídá presetu (7/14) — jinak
+// by getter spadl zpět na preset a číselný input by se nikdy neukázal.
+const dueCustom = ref(false)
+const dueSelectValue = computed<DuePreset>({
+  get() {
+    if (!supplier.value) return '7'
+    if (dueCustom.value) return 'custom'
+    const d = supplier.value.default_payment_due_days
+    const u = supplier.value.default_payment_due_unit
+    if (u === 'month' && d === 1) return 'month'
+    if (u === 'days' && d === 7)  return '7'
+    if (u === 'days' && d === 14) return '14'
+    return 'custom'
+  },
+  set(v: DuePreset) {
+    if (!supplier.value) return
+    dueCustom.value = (v === 'custom')
+    if (v === '7') {
+      supplier.value.default_payment_due_days = 7
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === '14') {
+      supplier.value.default_payment_due_days = 14
+      supplier.value.default_payment_due_unit = 'days'
+    } else if (v === 'month') {
+      supplier.value.default_payment_due_days = 1
+      supplier.value.default_payment_due_unit = 'month'
+    } else {
+      supplier.value.default_payment_due_unit = 'days'
+      // days zachovat — pokud byl 7/14 user dostane editovatelnou hodnotu k úpravě
+    }
+  },
+})
+
 const invoicePreview        = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).preview)
 const invoiceFormatError    = computed(() => validateAndPreview(supplier.value?.invoice_number_format ?? null).error)
 const proformaPreview       = computed(() => validateAndPreview(supplier.value?.proforma_number_format ?? null).preview)
@@ -73,6 +110,7 @@ async function saveSupplier() {
       tagline: supplier.value.tagline,
       commercial_register: supplier.value.commercial_register,
       default_payment_due_days: supplier.value.default_payment_due_days,
+      default_payment_due_unit: supplier.value.default_payment_due_unit,
       default_hourly_rate: supplier.value.default_hourly_rate,
       auto_send_reminders: supplier.value.auto_send_reminders,
       auto_generate_recurring: supplier.value.auto_generate_recurring,
@@ -272,7 +310,7 @@ async function removeCurrency(c: CurrencyAccount) {
 
     <div v-else-if="supplier" class="space-y-6">
       <!-- Supplier -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.supplier') }}</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
@@ -336,8 +374,20 @@ async function removeCurrency(c: CurrencyAccount) {
             <p class="text-xs text-neutral-500 mt-1">{{ t('settings.commercial_register_hint') }}</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due') }}</label>
-            <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_due_label') }}</label>
+            <div class="flex gap-2">
+              <select v-model="dueSelectValue" class="h-10 px-2 border border-neutral-300 rounded-md text-sm bg-surface" :class="dueSelectValue === 'custom' ? 'w-40' : 'w-full'">
+                <option value="7">{{ t('settings.default_due_preset_7') }}</option>
+                <option value="14">{{ t('settings.default_due_preset_14') }}</option>
+                <option value="month">{{ t('settings.default_due_preset_month') }}</option>
+                <option value="custom">{{ t('settings.default_due_preset_custom') }}</option>
+              </select>
+              <div v-if="dueSelectValue === 'custom'" class="flex items-center gap-2 flex-1">
+                <input v-model.number="supplier.default_payment_due_days" type="number" min="0" class="w-24 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+                <span class="text-sm text-neutral-500">{{ t('settings.default_due_custom_days_suffix') }}</span>
+              </div>
+            </div>
+            <p v-if="dueSelectValue === 'month'" class="text-xs text-neutral-500 mt-1">{{ t('settings.default_due_month_hint') }}</p>
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.default_hourly_rate') }} ({{ supplier.default_currency }})</label>
@@ -369,7 +419,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Číslování faktur — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.numbering_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.numbering_section') }}</h3>
@@ -432,7 +482,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.tax_section') }}</h3>
@@ -440,7 +490,7 @@ async function removeCurrency(c: CurrencyAccount) {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.taxpayer_type') }}</label>
-              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.taxpayer_type" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="fo">{{ t('settings.taxpayer_fo') }}</option>
                 <option value="po">{{ t('settings.taxpayer_po') }}</option>
@@ -448,7 +498,7 @@ async function removeCurrency(c: CurrencyAccount) {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.vat_period') }}</label>
-              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="supplier.vat_period" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option :value="null">— {{ t('common.unset') }} —</option>
                 <option value="monthly">{{ t('settings.vat_monthly') }}</option>
                 <option value="quarterly">{{ t('settings.vat_quarterly') }}</option>
@@ -457,7 +507,7 @@ async function removeCurrency(c: CurrencyAccount) {
             </div>
             <div v-if="!supplier.is_vat_payer">
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.flat_tax_band') }}</label>
-              <select v-model="(supplier as any).flat_tax_band" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-white text-sm">
+              <select v-model="(supplier as any).flat_tax_band" class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
                 <option value="none">{{ t('settings.flat_tax_none') }}</option>
                 <option value="band1">{{ t('settings.flat_tax_band1') }}</option>
                 <option value="band2">{{ t('settings.flat_tax_band2') }}</option>
@@ -556,7 +606,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Pohoda XML export config (volitelné) — samostatný box -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.pohoda_section') }}</h2>
         <div>
           <h3 class="sr-only">{{ t('settings.pohoda_section') }}</h3>
@@ -589,7 +639,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Email branding (M16) -->
-      <section class="bg-white border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-1">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.branding_title') }}</h2>
           <label class="inline-flex items-center gap-2 cursor-pointer">
@@ -683,7 +733,7 @@ async function removeCurrency(c: CurrencyAccount) {
       </section>
 
       <!-- Currencies / Bank accounts -->
-      <section class="bg-white border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <section class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
         <header class="px-5 py-3 border-b border-neutral-200">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.currencies_banks') }}</h2>
         </header>
@@ -731,7 +781,7 @@ async function removeCurrency(c: CurrencyAccount) {
           <span>{{ t('settings.add_another_account') }}</span>
           <button v-for="code in [...new Set(currencies.map(c => c.code))]" :key="code"
             @click="addCurrencyAccount(code)"
-            class="cursor-pointer px-2 h-7 border border-neutral-300 rounded text-xs hover:bg-white">
+            class="cursor-pointer px-2 h-7 border border-neutral-300 rounded text-xs hover:bg-surface">
             + {{ code }}
           </button>
         </div>
@@ -739,8 +789,8 @@ async function removeCurrency(c: CurrencyAccount) {
     </div>
 
     <!-- Modal — currency edit -->
-    <div v-if="editingCurrency" class="fixed inset-0 bg-neutral-900/40 z-50 flex items-center justify-center p-4">
-      <div class="bg-white rounded-xl shadow-lg max-w-md w-full p-5">
+    <div v-if="editingCurrency" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+      <div class="bg-surface rounded-xl shadow-lg max-w-md w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('settings.edit_currency_label_full', { label: editingCurrencyLabel }) }}</h3>
         <div class="space-y-3">
           <div>

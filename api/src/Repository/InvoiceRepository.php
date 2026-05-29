@@ -36,11 +36,13 @@ final class InvoiceRepository
                     cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
                     cur.label AS currency_label,
                     cur.account_number AS bank_account_number, cur.bank_code AS bank_code,
-                    cur.bank_name AS bank_name, cur.iban AS bank_iban, cur.bic AS bank_bic
+                    cur.bank_name AS bank_name, cur.iban AS bank_iban, cur.bic AS bank_bic,
+                    rcat.label AS revenue_category_label, rcat.code AS revenue_category_code
                FROM invoices i
                JOIN clients c ON c.id = i.client_id
           LEFT JOIN projects p ON p.id = i.project_id
                JOIN currencies cur ON cur.id = i.currency_id
+          LEFT JOIN revenue_categories rcat ON rcat.id = i.revenue_category_id
               WHERE i.id = ?'
         );
         $stmt->execute([$id]);
@@ -101,6 +103,33 @@ final class InvoiceRepository
             $row['czk_recap'] = null;
         }
 
+        // Související doklady (pro cross-link v detailu):
+        //  - u proformy: vystavený daňový doklad k záloze (dítě, invoice_type='invoice')
+        //  - u dokladu s parent_invoice_id: rodič (proforma / původní faktura u storna/dobropisu)
+        $row['final_invoice'] = null;
+        if (($row['invoice_type'] ?? '') === 'proforma') {
+            $ch = $pdo->prepare(
+                "SELECT id, varsymbol, status FROM invoices
+                  WHERE parent_invoice_id = ? AND invoice_type = 'invoice'
+                  ORDER BY id LIMIT 1"
+            );
+            $ch->execute([$id]);
+            $c = $ch->fetch(PDO::FETCH_ASSOC);
+            $row['final_invoice'] = $c === false ? null : [
+                'id' => (int) $c['id'], 'varsymbol' => $c['varsymbol'], 'status' => $c['status'],
+            ];
+        }
+        $row['parent_invoice'] = null;
+        if (!empty($row['parent_invoice_id'])) {
+            $par = $pdo->prepare('SELECT id, varsymbol, status, invoice_type FROM invoices WHERE id = ?');
+            $par->execute([(int) $row['parent_invoice_id']]);
+            $p = $par->fetch(PDO::FETCH_ASSOC);
+            $row['parent_invoice'] = $p === false ? null : [
+                'id' => (int) $p['id'], 'varsymbol' => $p['varsymbol'],
+                'status' => $p['status'], 'invoice_type' => $p['invoice_type'],
+            ];
+        }
+
         return $row;
     }
 
@@ -124,6 +153,7 @@ final class InvoiceRepository
                     ii.unit_price_without_vat, ii.vat_rate_id, ii.vat_rate_snapshot,
                     ii.total_without_vat, ii.total_vat, ii.total_with_vat,
                     ii.order_index, ii.item_kind, ii.linked_work_report_id,
+                    ii.vat_classification_code,
                     vr.code AS vat_code, vr.label_cs AS vat_label_cs, vr.label_en AS vat_label_en
                FROM invoice_items ii
                JOIN vat_rates vr ON vr.id = ii.vat_rate_id
@@ -266,7 +296,7 @@ final class InvoiceRepository
                        i.currency_id, cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
                        i.total_without_vat, i.total_vat, i.total_with_vat,
                        i.advance_paid_amount, i.amount_to_pay,
-                       i.status, i.payment_method,
+                       i.status, i.payment_method, i.revenue_category_id,
                        i.sent_at, i.last_reminder_at, i.reminder_count,
                        i.paid_at, i.cancelled_at,
                        c.company_name AS client_company_name,
@@ -371,6 +401,14 @@ final class InvoiceRepository
             throw new \InvalidArgumentException("Client #$clientId nenalezen.");
         }
 
+        // Výchozí kategorie tržby — explicitní volba vyhrává, jinak default zakázky >
+        // klienta (sdílený helper, viz resolveDefaultRevenueCategoryId). Stejnou logiku
+        // používají i ostatní cesty zakládání vydané faktury (recurring, import).
+        $projectId = isset($data['project_id']) && $data['project_id'] ? (int) $data['project_id'] : null;
+        $revenueCategoryId = (isset($data['revenue_category_id']) && $data['revenue_category_id'])
+            ? (int) $data['revenue_category_id']
+            : self::resolveDefaultRevenueCategoryId($pdo, $clientId, $projectId);
+
         // Volitelný ručně zadaný varsymbol (override automatického číslování při issue).
         // Trim + null-if-empty, max 20 znaků (DB sloupec varsymbol VARCHAR(20)).
         $manualVarsymbol = trim((string) ($data['varsymbol'] ?? ''));
@@ -389,8 +427,8 @@ final class InvoiceRepository
             (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
              issue_date, tax_date, due_date, currency_id, reverse_charge, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
-             payment_method, status, vat_classification_code, revenue_category, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?)';
+             payment_method, status, vat_classification_code, revenue_category, revenue_category_id, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?)';
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([
@@ -413,6 +451,7 @@ final class InvoiceRepository
             $paymentMethod,
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
+            $revenueCategoryId,
             $userId,
         ]);
 
@@ -443,15 +482,21 @@ final class InvoiceRepository
             }
         }
 
+        // Typ dokladu lze měnit jen u draftu (faktura/proforma/dobropis) — viz UpdateInvoiceAction,
+        // který u vystavené faktury posílá nezměněný typ. Storno/cancellation se přes update nenastaví.
+        $hasType = array_key_exists('invoice_type', $data)
+            && in_array((string) $data['invoice_type'], ['invoice', 'proforma', 'credit_note'], true);
+
         $sql = 'UPDATE invoices SET
                 client_id = ?, project_id = ?,
                 issue_date = ?, tax_date = ?, due_date = ?,
                 currency_id = ?, reverse_charge = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
                 advance_paid_amount = ?, discount_percent = ?,
-                vat_classification_code = ?, revenue_category = ?'
+                vat_classification_code = ?, revenue_category = ?, revenue_category_id = ?'
               . ($hasVarsymbol ? ', varsymbol = ?' : '')
               . ($hasPaymentMethod ? ', payment_method = ?' : '')
+              . ($hasType ? ', invoice_type = ?' : '')
               . ' WHERE id = ?';
 
         $params = [
@@ -469,9 +514,11 @@ final class InvoiceRepository
             self::clampDiscountPercent($data['discount_percent'] ?? 0),
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
+            isset($data['revenue_category_id']) && $data['revenue_category_id'] ? (int) $data['revenue_category_id'] : null,
         ];
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
         if ($hasPaymentMethod) $params[] = $paymentMethod;
+        if ($hasType) $params[] = (string) $data['invoice_type'];
         $params[] = $id;
 
         $this->db->pdo()->prepare($sql)->execute($params);
@@ -691,6 +738,23 @@ final class InvoiceRepository
         return $this->loadVatRates();
     }
 
+    /**
+     * Je odběratel zahraniční z EU? Pro country-aware klasifikaci RC:
+     * tuzemský odběratel + reverse_charge = §92a (ř.25), zahraniční EU = dodání do JČS (ř.20).
+     */
+    public function clientIsEuForeign(int $clientId): bool
+    {
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT COALESCE(co.is_eu, 0) AS is_eu, COALESCE(co.iso2, 'CZ') AS iso2
+               FROM clients c LEFT JOIN countries co ON co.id = c.country_id
+              WHERE c.id = ?"
+        );
+        $stmt->execute([$clientId]);
+        $r = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($r === false) return false;
+        return ((int) $r['is_eu'] === 1) && ((string) $r['iso2'] !== 'CZ');
+    }
+
     private function castInvoice(array $row): array
     {
         $row['id']                  = (int) $row['id'];
@@ -722,7 +786,35 @@ final class InvoiceRepository
         if (array_key_exists('has_work_report', $row)) {
             $row['has_work_report'] = (bool) $row['has_work_report'];
         }
+        if (array_key_exists('revenue_category_id', $row)) {
+            $row['revenue_category_id'] = $row['revenue_category_id'] !== null ? (int) $row['revenue_category_id'] : null;
+        }
         return $row;
+    }
+
+    /**
+     * Sdílené řešení výchozí kategorie tržby pro NOVOU vydanou fakturu.
+     * PŘEDNOST: výchozí kategorie zakázky (project) > výchozí kategorie klienta > NULL.
+     *
+     * Společný choke-point pro všechny cesty, které zakládají vydanou fakturu vlastním
+     * INSERTem mimo createDraft (RecurringInvoiceGenerator, InvoiceImportService) —
+     * aby se default aplikoval konzistentně. Volá se s explicitním PDO, takže nevyžaduje
+     * DI repozitáře v těchto službách.
+     */
+    public static function resolveDefaultRevenueCategoryId(PDO $pdo, int $clientId, ?int $projectId): ?int
+    {
+        if ($projectId !== null) {
+            $ps = $pdo->prepare('SELECT default_revenue_category_id FROM projects WHERE id = ?');
+            $ps->execute([$projectId]);
+            $pcat = $ps->fetchColumn();
+            if ($pcat !== false && $pcat !== null) {
+                return (int) $pcat;
+            }
+        }
+        $cs = $pdo->prepare('SELECT default_revenue_category_id FROM clients WHERE id = ?');
+        $cs->execute([$clientId]);
+        $ccat = $cs->fetchColumn();
+        return ($ccat !== false && $ccat !== null) ? (int) $ccat : null;
     }
 
     /**

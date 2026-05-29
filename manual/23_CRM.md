@@ -57,6 +57,10 @@ Pro vystavené (pohledávky) i přijaté (závazky), per currency.
 
 Pie chart (nebo bar) s rozpadem nákladů per `expense_categories`. Pokud nemáš kategorie přiřazené, vidíš jeden bar "Bez kategorie" — doporučujeme přiřadit (Číselníky → Kategorie nákladů).
 
+### Tržby podle kategorií
+
+Symetrický rozpad tržeb per `revenue_categories` (tabulka v CRM dashboardu, koláčový graf na stránce **Tržby**, rolling 12 měsíců, přepočet na CZK). Kategorii tržby vybíráš na vydané faktuře; výchozí kategorii lze přednastavit na **zákazníkovi** i na **zakázce** (zakázka má přednost) a spravuje se v **Číselníky → Kategorie tržeb**. Výchozí kategorie se aplikuje i u importovaných, pravidelných a z proformy vyúčtovaných faktur.
+
 ### Churn risk
 
 Klienti, kteří **60+ dní nemají objednávku**. Pro každého: poslední faktura, počet dní bez objednávky (color coded: >180 red, >90 warning), kumulativní revenue. Click na klienta → /clients/{id}.
@@ -64,7 +68,7 @@ Klienti, kteří **60+ dní nemají objednávku**. Pro každého: poslední fakt
 ## Filtry
 
 - **Period**: 3 / 6 / 12 / 24 měsíců zpět
-- **Currency**: pokud máš víc měn, picker (default první)
+- **Currency**: pokud máš víc měn, picker s volbou **„Vše (CZK)"** (výchozí) — boxy Přehled i měsíční graf sečtou všechny měny přepočtené na CZK; nebo konkrétní měna (nativní částky). Chybějící data za zvolenou měnu se ukážou jako 0 (ne částka jiné měny).
 - **Recompute** (admin only) — manuální trigger `sp_recompute_crm_monthly_summary` (typicky není potřeba, cron běží denně, ale po importu většího batche faktur může pomoct hned aktualizovat)
 
 ## Jak data fungují

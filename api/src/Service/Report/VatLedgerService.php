@@ -104,7 +104,11 @@ final class VatLedgerService
                    COALESCE(
                        ii.vat_classification_code, i.vat_classification_code,
                        CASE
-                           WHEN i.reverse_charge = 1 THEN '20'
+                           -- Zahraniční EU odběratel + RC = dodání do JČS → ř.20 (dod_zb).
+                           WHEN i.reverse_charge = 1
+                                AND COALESCE(co.is_eu, 0) = 1 AND COALESCE(co.iso2, 'CZ') <> 'CZ' THEN '20'
+                           -- Tuzemský odběratel + RC = přenesená daň. povinnost §92 → ř.25 (pln_rez_pren), KH A.1.
+                           WHEN i.reverse_charge = 1 THEN '25s'
                            WHEN ii.vat_rate_snapshot >= 20.5 THEN '1'
                            WHEN ii.vat_rate_snapshot > 0     THEN '2'
                            WHEN ii.vat_rate_snapshot = 0     THEN '3'
