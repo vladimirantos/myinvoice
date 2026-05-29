@@ -28,6 +28,9 @@ storage
 private
 aspnet_client
 
+# Soukromé naskenované faktury pro jednorázový import — nikdy do image
+faktury
+
 # Web server configs (Docker uses Apache directly via .htaccess)
 web.config
 

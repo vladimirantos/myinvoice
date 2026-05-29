@@ -37,6 +37,9 @@ docker-compose.rosti.yml
 .rostistate
 /data/
 
+# Soukromé naskenované faktury pro jednorázový import — NEpatří do gitu ani image
+/faktury/
+
 
 # XSD schémata MFČR jsou nyní commitnutá v api/xsd/ (public schémata, ~250 KB).
 # Legacy: storage/xsd/ se už nepoužívá — zde držíme jen mpdf-temp/ exempci.
