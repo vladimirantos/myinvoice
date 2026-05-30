@@ -196,7 +196,7 @@ table.items {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed; /* striktně drží šířky sloupců → čísla se nezalamují */
-    margin-top: 24mm;
+    margin-top: 42mm;
     margin-bottom: 24mm;
     font-size: 9pt;
 }
