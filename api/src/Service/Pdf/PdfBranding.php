@@ -93,8 +93,8 @@ final class PdfBranding
         // nepřebije.
         return "\n/* ─── Branding override (per-supplier accent color) ─── */\n"
             . ".brand-name { color: {$color}; }\n"
-            . ".accent-bar { border-bottom-color: {$color}; }\n"
-            . ".party-tick { border-bottom-color: {$color}; }\n"
+            . "hr.accent-bar { background-color: {$color}; color: {$color}; }\n"
+            . "table.party-tick td { border-bottom-color: {$color}; }\n"
             . "table.items th { border-bottom-color: {$color}; }\n"
             . "table.totals-table tr.grand td, table.totals-table tr.grand td.tot-label { color: {$color}; border-top-color: {$color}; }\n"
             . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; }\n"

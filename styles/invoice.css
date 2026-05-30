@@ -58,16 +58,16 @@ td.meta { width: 45%; text-align: right; }
 
 /* Akcentový pruh nad „Faktura" — vpravo zarovnaná 1-buňková tabulka (mPDF: margin-left:auto
    funguje na tabulce, viz .czk-recap; border-top dělá linku spolehlivěji než bg-height). */
-/* Block div s border-bottom + width + margin-left:auto — jediná varianta, kterou
-   mPDF u prázdného prvku honoruje na plnou šířku vpravo (ověřeno probe; table i
-   inline-block kolabují na obsah). */
-.accent-bar {
-    width: 46mm;
-    border-bottom: 0.8mm solid #3B2D83;
-    font-size: 0;
-    line-height: 0;
-    margin-left: auto;
-    margin-bottom: 2.5mm;
+/* Accent bar nad „Faktura" = <hr>. Uvnitř <td> mPDF honoruje šířku jen u <hr>
+   (table i div tam kolabují/mizí — ověřeno probe); hr se roztáhne na šířku pravého
+   sloupce → čistá tenká linka. Barva přes background-color + color, ne border. */
+hr.accent-bar {
+    height: 0.8mm;
+    background-color: #3B2D83;
+    color: #3B2D83;
+    border: none;
+    margin-top: 0;
+    margin-bottom: 3mm;
 }
 .doc-title {
     font-size: 18pt;
@@ -104,10 +104,10 @@ td.meta { width: 45%; text-align: right; }
 }
 
 /* Semantické varianty hlavičky (dobropis/storno) — přebarví akcentový pruh + titulek. */
-.head.credit-note .accent-bar { border-bottom-color: #D45B5B; }
+.head.credit-note hr.accent-bar { background-color: #D45B5B; color: #D45B5B; }
 .head.credit-note .doc-title,
 .head.credit-note .brand-name { color: #D45B5B; }
-.head.cancellation .accent-bar { border-bottom-color: #7A748C; }
+.head.cancellation hr.accent-bar { background-color: #7A748C; color: #7A748C; }
 .head.cancellation .doc-title,
 .head.cancellation .brand-name { color: #7A748C; text-decoration: line-through; }
 
@@ -127,13 +127,18 @@ td.meta { width: 45%; text-align: right; }
 .parties > tbody > tr > td + td { padding: 0 0 0 8mm; }
 
 /* Malý fialový proužek nad labelem strany. */
-/* Stejný princip jako .accent-bar, jen vlevo zarovnaný a kratší. */
-.party-tick {
+/* Malý proužek nad labelem strany. Krátký dash → tabulka (ta v td zkolabuje na
+   krátkou šířku, což je tu žádoucí; hr by byl přes celý sloupec). */
+table.party-tick {
     width: 9mm;
-    border-bottom: 0.8mm solid #3B2D83;
+    border-collapse: collapse;
+    margin: 0 0 2mm 0;
+}
+table.party-tick td {
+    border-bottom: 0.9mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
-    margin-bottom: 2mm;
+    padding: 0;
 }
 .parties h2 {
     margin: 0 0 2mm;
