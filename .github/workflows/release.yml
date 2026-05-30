@@ -73,18 +73,43 @@ jobs:
       - name: Push latest
         run: docker push $IMAGE:latest
 
-      # Tell Rosti to pull the new image and restart the stack
+      # Tell Rosti to pull the new image and restart the stack.
+      #
+      # Robustní varianta: endpoint dělá `docker compose pull && up` synchronně.
+      # U velkého image (9 vrstev, ~2 min) občas přeteče proxy timeout → vrátí
+      # ne-JSON (HTML/504) a původní `jq -r '.status'` pod `bash -e` shodil celý
+      # krok (exit 5: "Invalid numeric literal"). Proto:
+      #   - set +e + jq 2>/dev/null → ne-JSON neshazuje krok
+      #   - retry s prodlevou → 1. call stáhne image na Rosti (doběhne i po HTTP
+      #     timeoutu), další call už ho má v cache → rychlý → vrátí {status:0}
+      #   - selžeme až po vyčerpání pokusů, s ručním fallbackem
       - name: Call pull+up endpoint
+        shell: bash
         run: |
-          RESPONSE=$(curl -s $PULL_ENDPOINT)
-          STATUS=$(echo "$RESPONSE" | jq -r '.status')
-          if [ "$STATUS" = "0" ]; then
-            echo "Pull endpoint call successful"
-          else
-            echo "Error: Pull endpoint returned status $STATUS"
-            echo "--- STDOUT ---"
-            echo "$RESPONSE" | jq -r '.stdout'
-            echo "--- STDERR ---"
-            echo "$RESPONSE" | jq -r '.stderr'
+          set +e
+          attempts=4
+          delay=30
+          ok=0
+          for i in $(seq 1 $attempts); do
+            echo "Deploy trigger — pokus $i/$attempts…"
+            RESPONSE=$(curl -sS --connect-timeout 15 --max-time 300 "$PULL_ENDPOINT")
+            CURL_RC=$?
+            STATUS=$(printf '%s' "$RESPONSE" | jq -r '.status' 2>/dev/null)
+            if [ "$CURL_RC" = "0" ] && [ "$STATUS" = "0" ]; then
+              echo "✓ Pull endpoint OK (pokus $i)"
+              printf '%s' "$RESPONSE" | jq -r '.stdout // empty' 2>/dev/null
+              ok=1
+              break
+            fi
+            echo "::warning::Pokus $i neúspěšný (curl_rc=$CURL_RC, status='${STATUS:-<ne-JSON>}'). Odpověď (zkráceno):"
+            printf '%s' "$RESPONSE" | head -c 800; echo
+            if [ "$i" -lt "$attempts" ]; then
+              echo "Čekám ${delay}s (image se mezitím stáhne na Rosti) a zkusím znovu…"
+              sleep "$delay"
+            fi
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::Pull+up endpoint nepotvrdil úspěch ani po $attempts pokusech."
+            echo "Image je na ghcr — nasaď ručně: rosticli stacks ssh docker compose up -d app"
             exit 1
           fi
