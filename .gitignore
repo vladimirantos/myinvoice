@@ -40,6 +40,9 @@ docker-compose.rosti.yml
 # Soukromé naskenované faktury pro jednorázový import — NEpatří do gitu ani image
 /faktury/
 
+# Brainstorming companion (mockupy, dočasné HTML návrhy) — NEpatří do gitu
+.superpowers/
+
 
 # XSD schémata MFČR jsou nyní commitnutá v api/xsd/ (public schémata, ~250 KB).
 # Legacy: storage/xsd/ se už nepoužívá — zde držíme jen mpdf-temp/ exempci.
