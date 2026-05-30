@@ -127,14 +127,15 @@ hr.accent-bar {
 .parties > tbody > tr > td + td { padding: 0 0 0 8mm; }
 
 /* Malý fialový proužek nad labelem strany. */
-/* Malý proužek nad labelem strany. Krátký dash → tabulka (ta v td zkolabuje na
-   krátkou šířku, což je tu žádoucí; hr by byl přes celý sloupec). */
+/* Proužek nad labelem strany — kontrolovaná délka přes <td width="N"> (HTML
+   atribut v px; mPDF honoruje, kdežto CSS width / colgroup v buňce kolabují —
+   ověřeno probe). Druhá buňka prázdná dorovná zbytek šířky. */
 table.party-tick {
-    width: 9mm;
+    width: 100%;
     border-collapse: collapse;
-    margin: 0 0 2mm 0;
+    margin: 1mm 0 3mm 0;
 }
-table.party-tick td {
+table.party-tick td.tick-bar {
     border-bottom: 0.9mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
@@ -164,7 +165,7 @@ table.party-kv {
     margin-top: 4mm;
     font-size: 9pt;
 }
-table.party-kv td { padding: 0.7mm 0; vertical-align: top; }
+table.party-kv td { padding: 1.4mm 0; vertical-align: top; }
 table.party-kv td.k { color: #8F8A9B; white-space: nowrap; padding-right: 4mm; }
 table.party-kv td.v {
     text-align: right;
@@ -195,8 +196,8 @@ table.items {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed; /* striktně drží šířky sloupců → čísla se nezalamují */
-    margin-top: 2mm;
-    margin-bottom: 6mm;
+    margin-top: 9mm;
+    margin-bottom: 9mm;
     font-size: 9pt;
 }
 table.items th {
@@ -255,7 +256,7 @@ table.totals-table tr.grand td {
     font-size: 14pt;
     font-weight: bold;
     padding: 3mm;
-    border-top: 1.2mm solid #3B2D83;
+    border-top: 0.5mm solid #3B2D83;
 }
 table.totals-table tr.grand td.tot-label { color: #3B2D83; }
 table.totals-table tr.advance td { color: #6B6577; }

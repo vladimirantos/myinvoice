@@ -73,7 +73,7 @@
 <table class="parties">
   <tr>
     <td>
-      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
+      <table class="party-tick"><tr><td width="75" class="tick-bar">&nbsp;</td><td></td></tr></table>
       <h2>{{ t('Dodavatel', 'Supplier') }}</h2>
       <div class="party-name">{{ supplier.company_name }}</div>
       {% if supplier.display_name and supplier.display_name != supplier.company_name %}
@@ -93,7 +93,7 @@
       </table>
     </td>
     <td>
-      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
+      <table class="party-tick"><tr><td width="75" class="tick-bar">&nbsp;</td><td></td></tr></table>
       <h2>{{ t('Odběratel', 'Customer') }}</h2>
       <div class="party-name">{{ client.company_name }}</div>
       {% if client.first_name or client.last_name %}
