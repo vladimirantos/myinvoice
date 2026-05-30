@@ -160,7 +160,7 @@ table.party-tick td.tick-bar {
 
 /* KV řádky uvnitř sloupce strany (label vlevo šedě / hodnota vpravo). */
 table.party-kv {
-    width: 100%;
+    width: 80%; /* užší než sloupec → uprostřed stránky vznikne mezera mezi stranami */
     border-collapse: collapse;
     margin-top: 4mm;
     font-size: 9pt;
