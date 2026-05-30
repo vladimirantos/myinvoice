@@ -87,8 +87,8 @@ jobs:
         shell: bash
         run: |
           set +e
-          attempts=4
-          delay=30
+          attempts=5
+          delay=75
           ok=0
           for i in $(seq 1 $attempts); do
             echo "Deploy trigger — pokus $i/$attempts…"

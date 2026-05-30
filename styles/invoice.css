@@ -60,6 +60,7 @@ td.meta { width: 45%; text-align: right; }
    funguje na tabulce, viz .czk-recap; border-top dělá linku spolehlivěji než bg-height). */
 table.accent-bar {
     width: 46mm;
+    table-layout: fixed; /* jinak mPDF u skoro prázdné buňky šířku zkolabuje na obsah */
     margin-top: 0;
     margin-right: 0;
     margin-bottom: 2.5mm;
@@ -67,7 +68,7 @@ table.accent-bar {
     border-collapse: collapse;
 }
 table.accent-bar td {
-    border-top: 1.1mm solid #3B2D83;
+    border-top: 0.8mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
     padding: 0;
@@ -131,12 +132,13 @@ table.accent-bar td {
 
 /* Malý fialový proužek nad labelem strany. */
 table.party-tick {
-    width: 8mm;
+    width: 9mm;
+    table-layout: fixed; /* viz accent-bar — drží šířku v mPDF */
     margin: 0 0 2mm 0;
     border-collapse: collapse;
 }
 table.party-tick td {
-    border-top: 1mm solid #3B2D83;
+    border-top: 0.8mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
     padding: 0;
@@ -195,6 +197,7 @@ table.meta-strip td.v.mono { font-family: 'DejaVu Sans Mono', monospace; }
 table.items {
     width: 100%;
     border-collapse: collapse;
+    table-layout: fixed; /* striktně drží šířky sloupců → čísla se nezalamují */
     margin-top: 2mm;
     margin-bottom: 6mm;
     font-size: 9pt;
@@ -205,16 +208,17 @@ table.items th {
     font-size: 8pt;
     text-transform: uppercase;
     letter-spacing: 0.5pt;
-    padding: 0 3mm 2.5mm 3mm;
+    padding: 0 2.2mm 2.5mm 2.2mm;
     text-align: left;
     font-weight: 700;
     border-bottom: 0.7pt solid #3B2D83;
     white-space: nowrap;
 }
 table.items td {
-    padding: 3mm 3mm;
+    padding: 2.5mm 2.2mm;
     border-bottom: 0.3pt solid #ECEAF1;
     vertical-align: top;
+    word-wrap: break-word; /* dlouhý popis se zalomí (ne číslo — to má nowrap + dost místa) */
 }
 table.items .num { text-align: right; font-family: 'DejaVu Sans Mono', monospace; }
 table.items .center { text-align: center; }
