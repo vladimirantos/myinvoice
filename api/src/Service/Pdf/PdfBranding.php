@@ -85,22 +85,27 @@ final class PdfBranding
         $lineMedium = AccentColor::tint($color, 0.28);
         $badgeBorder = AccentColor::tint($color, 0.30);
 
+        // Minimalistický layout (2026-05): akcent = fialový pruh nad „Faktura",
+        // proužky nad stranami, tenká linka pod hlavičkou tabulky, fialový součet
+        // (bez plné plochy). Titulek dokladu (.doc-title) i šedé labely zůstávají
+        // neutrální (nepřebarvujeme). Semantické varianty (dobropis/storno) mají
+        // vyšší specificitu (.head.credit-note …) → tenhle 1-třídový override je
+        // nepřebije.
         return "\n/* ─── Branding override (per-supplier accent color) ─── */\n"
-            . ".head { border-bottom-color: {$color}; }\n"
-            . ".brand-name, .doc-type { color: {$color}; }\n"
-            . ".parties h2, td.meta-label, .bank-label, .qr-box .qr-label { color: {$color}; }\n"
-            . "table.items th { background: {$color}; }\n"
-            . "table.totals-table tr.grand td { background: {$color}; }\n"
-            . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; background: {$bgSoft}; }\n"
+            . ".brand-name { color: {$color}; }\n"
+            . "table.accent-bar td { border-top-color: {$color}; }\n"
+            . "table.party-tick td { border-top-color: {$color}; }\n"
+            . "table.items th { border-bottom-color: {$color}; }\n"
+            . "table.totals-table tr.grand td, table.totals-table tr.grand td.tot-label { color: {$color}; border-top-color: {$color}; }\n"
+            . "table.totals-table tr.to-pay td { border-top-color: {$color}; color: {$color}; }\n"
             . "table.totals-table tr.subtotal td { border-top-color: {$lineSoft}; }\n"
-            . "table.czk-recap td.czk-recap-title, table.czk-recap tr.grand td { color: {$color}; }\n"
-            . "table.czk-recap td.czk-recap-title { border-bottom-color: {$lineMedium}; }\n"
+            . "table.czk-recap td.czk-recap-title { color: {$color}; border-bottom-color: {$lineMedium}; }\n"
+            . "table.czk-recap tr.grand td { color: {$color}; border-top-color: {$color}; }\n"
             . "table.czk-recap tr.subtotal td { border-top-color: {$lineSoft}; }\n"
-            . "table.bank-frame { border-color: {$lineMedium}; }\n"
-            . ".qr-box { border-color: {$lineSoft}; }\n"
             . ".isdoc-badge { color: {$color}; background: {$bgSoft}; border-color: {$badgeBorder}; }\n"
             . ".note { border-left-color: {$color}; }\n"
             . ".note.rc-note { border-left-color: #E8A547; }\n"
+            . ".proforma-note { border-left-color: {$color}; }\n"
             . ".wr-title, .wr-link { color: {$color}; }\n";
     }
 }

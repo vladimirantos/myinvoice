@@ -234,6 +234,7 @@ final class InvoicePdfRenderer
         }));
 
         $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
+        $signaturePath = $this->resolveSignaturePath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
         return $twig->render('invoice.twig', [
             'invoice'           => $invoice,
@@ -256,6 +257,7 @@ final class InvoicePdfRenderer
             // Opt-in: vedle loga vykreslit i název firmy (migrace 0058). Jen když logo
             // reálně je — bez loga se název ukazuje vždy (textový brand-name fallback).
             'logo_show_name'    => $logoPath !== null && !empty($supplierData['pdf_logo_show_name']),
+            'signature_path'    => $signaturePath, // razítko vpravo dole (null = nevykreslit)
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
         ]);
     }
@@ -465,6 +467,33 @@ final class InvoicePdfRenderer
         $svgSibling = preg_replace('/\.png$/i', '.svg', (string) $logoPath);
         if (is_string($svgSibling) && $svgSibling !== $logoPath) {
             $svgAbs = \MyInvoice\Service\Mail\SafeLogoPath::resolve($svgSibling, $supplierId);
+            if ($svgAbs !== null && $this->svgIsMpdfCompatible($svgAbs)) {
+                return $svgAbs;
+            }
+        }
+        return $abs;
+    }
+
+    /**
+     * Razítko / podpis pro PDF (vpravo dole). Stejný gate i bezpečnostní model jako
+     * logo: zobrazí se jen při zapnutém brandingu (`email_branding_enabled`),
+     * validace cesty přes SafeSignaturePath (defense-in-depth proti LFI), preference
+     * mPDF-kompatibilního SVG sidecaru, fallback PNG. Vrací null = nevykreslit.
+     */
+    private function resolveSignaturePath(array $supplier, int $supplierIdFallback = 0): ?string
+    {
+        if (empty($supplier['email_branding_enabled'])) return null;
+
+        $signaturePath = $supplier['signature_path'] ?? null;
+        if (!$signaturePath) return null;
+
+        $supplierId = (int) ($supplier['id'] ?? $supplierIdFallback);
+        $abs = \MyInvoice\Service\Mail\SafeSignaturePath::resolve((string) $signaturePath, $supplierId);
+        if ($abs === null) return null;
+
+        $svgSibling = preg_replace('/\.png$/i', '.svg', (string) $signaturePath);
+        if (is_string($svgSibling) && $svgSibling !== $signaturePath) {
+            $svgAbs = \MyInvoice\Service\Mail\SafeSignaturePath::resolve($svgSibling, $supplierId);
             if ($svgAbs !== null && $this->svgIsMpdfCompatible($svgAbs)) {
                 return $svgAbs;
             }

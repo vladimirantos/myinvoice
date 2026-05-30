@@ -1,5 +1,6 @@
 {# MyInvoice.cz — PDF šablona faktury (mPDF + Twig) #}
-{# Variables: invoice (full hydrated), supplier, client, bank, qr_data_uri, locale #}
+{# Variables: invoice (full hydrated), supplier, client, bank, qr_data_uri, locale,
+   signature_path (abs cesta k razítku nebo null), doc_title, doc_type_label #}
 <!doctype html>
 <html lang="{{ locale|default('cs') }}">
 <head>
@@ -17,13 +18,32 @@
 </htmlpagefooter>
 <sethtmlpagefooter name="attribution" value="on" />
 
+{# Pomocné odvozeniny #}
+{%- set payment_label = t('Bankovní převod', 'Bank transfer') -%}
+{%- if payment_method == 'card' -%}{% set payment_label = t('Platební karta', 'Card') %}
+{%- elseif payment_method == 'cash' -%}{% set payment_label = t('Hotově', 'Cash') %}
+{%- elseif payment_method == 'other' -%}{% set payment_label = t('Jiný způsob', 'Other') %}
+{%- endif -%}
+
+{%- set doc_subtitle = '' -%}
+{%- if invoice.invoice_type == 'invoice' and supplier.is_vat_payer -%}{% set doc_subtitle = t('Daňový doklad', 'Tax document') %}
+{%- elseif invoice.invoice_type == 'proforma' -%}{% set doc_subtitle = t('Není daňový doklad', 'Not a tax document') %}
+{%- elseif invoice.invoice_type == 'credit_note' -%}{% set doc_subtitle = supplier.is_vat_payer ? t('Opravný daňový doklad', 'Tax credit note') : t('Opravná faktura', 'Credit note') %}
+{%- elseif invoice.invoice_type == 'cancellation' -%}{% set doc_subtitle = t('Storno (interní)', 'Cancellation (internal)') %}
+{%- endif -%}
+
+{%- set bank_acct = '' -%}
+{%- if bank -%}
+  {%- if bank.account_number -%}{% set bank_acct = bank.account_number ~ (bank.bank_code ? '/' ~ bank.bank_code : '') %}
+  {%- elseif bank.iban -%}{% set bank_acct = bank.iban %}
+  {%- endif -%}
+{%- endif -%}
+{%- set show_bank_row = payment_method == 'bank_transfer' and bank_acct != '' -%}
+
 {# ─── HLAVIČKA ─── #}
 <table class="head{% if invoice.invoice_type == 'credit_note' %} credit-note{% elseif invoice.invoice_type == 'cancellation' %} cancellation{% endif %}">
   <tr>
     {% if logo_show_name and logo_path and logo_path is not empty %}
-      {# Logo + název firmy: dvě SOUSEDNÍ buňky .head (žádná vnořená tabulka — ta v mPDF
-         mazala spodní čáru hlavičky). Mezeru dělá pevná šířka buňky loga: mPDF na buňce
-         respektuje `width`, ne padding. #}
       <td class="logo-img-cell"><img src="{{ logo_path }}" alt="logo"></td>
       <td class="logo-name">{{ supplier.display_name|default(supplier.company_name) }}</td>
     {% else %}
@@ -36,121 +56,101 @@
       </td>
     {% endif %}
     <td class="meta">
-      <div class="doc-type">{{ doc_type_label }}</div>
-      {% if invoice.varsymbol %}
-        <div class="varsymbol-big">{{ invoice.varsymbol }}</div>
-      {% endif %}
+      <table class="accent-bar"><tr><td>&nbsp;</td></tr></table>
+      <div class="doc-title">{{ doc_title }}</div>
+      {% if doc_subtitle %}<div class="doc-subtitle">{{ doc_subtitle }}</div>{% endif %}
       {% if parent_varsymbol %}
         <div class="parent-ref">{{ t('k faktuře', 'to invoice') }} {{ parent_varsymbol }}</div>
       {% endif %}
       {% if isdoc_attachment %}
-        {# Vizuální badge — samotný embedded ISDOC soubor přidává mPDF přes
-           SetAssociatedFiles() v PDF/A-3 /AF + /Names /EmbeddedFiles. Klikatelná
-           paperclip annotation tady BYLA, ale duplikovala přílohu pod sanitizovaným
-           filename (mPDF si dělá embed lokálně z file= cesty), takže ji zde nemáme. #}
         <div class="isdoc-badge">ISDOC</div>
       {% endif %}
     </td>
   </tr>
 </table>
 
-{# ─── STRANY ─── #}
+{# ─── STRANY (s vmíchanými metadaty) ─── #}
 <table class="parties">
   <tr>
     <td>
+      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
       <h2>{{ t('Dodavatel', 'Supplier') }}</h2>
-      <div class="spacer-3">&nbsp;</div>
       <div class="party-name">{{ supplier.company_name }}</div>
       {% if supplier.display_name and supplier.display_name != supplier.company_name %}
-        <div>{{ supplier.display_name }}</div>
+        <div class="party-addr">{{ supplier.display_name }}</div>
       {% endif %}
-      <div>{{ supplier.street }}</div>
-      <div>{{ supplier.zip }} {{ supplier.city }}</div>
-      <div>{{ locale == 'en' ? supplier.country_name_en : supplier.country_name_cs }}</div>
-      <div class="spacer-4">&nbsp;</div>
-      <div class="ic-dic">
-        {% if supplier.ic %}{{ t('IČO', 'Reg. No.') }}: {{ supplier.ic }}<br>{% endif %}
-        {% if supplier.dic %}{{ t('DIČ', 'VAT ID') }}: {{ supplier.dic }}{% endif %}
-      </div>
+      <div class="party-addr">{{ supplier.street }}</div>
+      <div class="party-addr">{{ supplier.zip }} {{ supplier.city }}</div>
+      <div class="party-addr">{{ locale == 'en' ? supplier.country_name_en : supplier.country_name_cs }}</div>
+      <table class="party-kv">
+        {% if supplier.ic %}<tr><td class="k">{{ t('IČO', 'Reg. No.') }}</td><td class="v">{{ supplier.ic }}</td></tr>{% endif %}
+        {% if supplier.dic %}<tr><td class="k">{{ t('DIČ', 'VAT ID') }}</td><td class="v">{{ supplier.dic }}</td></tr>{% endif %}
+      </table>
+      <table class="party-kv">
+        {% if show_bank_row %}<tr><td class="k">{{ t('Bankovní účet', 'Bank account') }}</td><td class="v">{{ bank_acct }}</td></tr>{% endif %}
+        {% if invoice.varsymbol %}<tr><td class="k">{{ t('Variabilní symbol', 'Var. symbol') }}</td><td class="v">{{ invoice.varsymbol }}</td></tr>{% endif %}
+        <tr><td class="k">{{ t('Způsob platby', 'Payment') }}</td><td class="v plain">{{ payment_label }}</td></tr>
+      </table>
     </td>
     <td>
+      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
       <h2>{{ t('Odběratel', 'Customer') }}</h2>
-      <div class="spacer-3">&nbsp;</div>
       <div class="party-name">{{ client.company_name }}</div>
       {% if client.first_name or client.last_name %}
-        <div>{{ client.first_name }} {{ client.last_name }}</div>
+        <div class="party-addr">{{ client.first_name }} {{ client.last_name }}</div>
       {% endif %}
-      <div>{{ client.street }}</div>
-      <div>{{ client.zip }} {{ client.city }}</div>
-      <div>{{ locale == 'en' ? client.country_name_en : client.country_name_cs }}</div>
-      <div class="spacer-4">&nbsp;</div>
-      <div class="ic-dic">
-        {% if client.ic %}{{ t('IČO', 'Reg. No.') }}: {{ client.ic }}<br>{% endif %}
-        {% if client.dic %}{{ t('DIČ', 'VAT ID') }}: {{ client.dic }}{% endif %}
-      </div>
+      <div class="party-addr">{{ client.street }}</div>
+      <div class="party-addr">{{ client.zip }} {{ client.city }}</div>
+      <div class="party-addr">{{ locale == 'en' ? client.country_name_en : client.country_name_cs }}</div>
+      <table class="party-kv">
+        {% if client.ic %}<tr><td class="k">{{ t('IČO', 'Reg. No.') }}</td><td class="v">{{ client.ic }}</td></tr>{% endif %}
+        {% if client.dic %}<tr><td class="k">{{ t('DIČ', 'VAT ID') }}</td><td class="v">{{ client.dic }}</td></tr>{% endif %}
+      </table>
+      <table class="party-kv">
+        <tr><td class="k">{{ t('Datum vystavení', 'Issue date') }}</td><td class="v">{{ invoice.issue_date|date(date_format) }}</td></tr>
+        <tr><td class="k">{{ t('Datum splatnosti', 'Due date') }}</td><td class="v">{{ invoice.due_date|date(date_format) }}</td></tr>
+        {% if supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma' %}
+          <tr><td class="k">{{ t('Datum zdan. plnění', 'Tax point') }}</td><td class="v">{{ invoice.tax_date|date(date_format) }}</td></tr>
+        {% endif %}
+      </table>
     </td>
   </tr>
 </table>
 
-{# ─── METADATA ─── #}
-<table class="meta-grid">
-  <tr>
-    <td class="meta-label">{{ t('Vystaveno', 'Issued') }}</td>
-    <td class="meta-value">{{ invoice.issue_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('Var. symbol', 'Var. symbol') }}</td>
-    <td class="meta-value mono">{{ invoice.varsymbol|default('—') }}</td>
-  </tr>
+{# ─── KOMPAKTNÍ METADATOVÝ PRUH (zbylá pole) ─── #}
+{%- set show_meta_strip = (invoice.currency != 'CZK')
+    or (supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma')
+    or (bank and bank.bic) or (bank and bank.bank_name)
+    or invoice.project_name or invoice.project_number or invoice.contract_number
+    or (not supplier.is_vat_payer) -%}
+{% if show_meta_strip %}
+<table class="meta-strip">
   {% if not supplier.is_vat_payer %}
-  <tr>
-    <td class="meta-label">{{ t('DPH', 'VAT') }}</td>
-    <td class="meta-value" colspan="3">{{ t('Není plátce DPH', 'Not a VAT payer') }}</td>
-  </tr>
-  {% elseif invoice.tax_date and invoice.invoice_type != 'proforma' %}
-  <tr>
-    <td class="meta-label">{{ t('DUZP', 'Tax point') }}</td>
-    <td class="meta-value">{{ invoice.tax_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('KS', 'Const. symbol') }}</td>
-    <td class="meta-value mono">0308</td>
-  </tr>
+    <tr><td class="k">{{ t('DPH', 'VAT') }}</td><td class="v">{{ t('Není plátce DPH', 'Not a VAT payer') }}</td></tr>
   {% endif %}
-  <tr>
-    <td class="meta-label">{{ t('Splatnost', 'Due') }}</td>
-    <td class="meta-value">{{ invoice.due_date|date(date_format) }}</td>
-    <td class="meta-label">{{ t('Měna', 'Currency') }}</td>
-    <td class="meta-value mono">{{ invoice.currency }}</td>
-  </tr>
-  <tr>
-    <td class="meta-label">{{ t('Úhrada', 'Payment') }}</td>
-    <td class="meta-value">
-      {%- if payment_method == 'card' -%}{{ t('Platební karta', 'Card') }}
-      {%- elseif payment_method == 'cash' -%}{{ t('Hotově', 'Cash') }}
-      {%- elseif payment_method == 'other' -%}{{ t('Jiný způsob', 'Other') }}
-      {%- else -%}{{ t('Bankovní převod', 'Bank transfer') }}{%- endif -%}
-    </td>
-    {% if invoice.project_name %}
-      <td class="meta-label">{{ t('Zakázka', 'Project') }}</td>
-      <td class="meta-value">{{ invoice.project_name }}</td>
-    {% else %}
-      <td></td><td></td>
-    {% endif %}
-  </tr>
-  {% if invoice.project_number or invoice.contract_number %}
-  <tr>
-    {% if invoice.project_number %}
-      <td class="meta-label">{{ t('Vaše číslo', 'Your order no.') }}</td>
-      <td class="meta-value mono">{{ invoice.project_number }}</td>
-    {% else %}
-      <td></td><td></td>
-    {% endif %}
-    {% if invoice.contract_number %}
-      <td class="meta-label">{{ t('Vaše smlouva', 'Your contract') }}</td>
-      <td class="meta-value mono">{{ invoice.contract_number }}</td>
-    {% else %}
-      <td></td><td></td>
-    {% endif %}
-  </tr>
+  {% if invoice.currency != 'CZK' %}
+    <tr><td class="k">{{ t('Měna', 'Currency') }}</td><td class="v mono">{{ invoice.currency }}</td></tr>
+  {% endif %}
+  {% if supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma' %}
+    <tr><td class="k">{{ t('Konst. symbol', 'Const. symbol') }}</td><td class="v mono">0308</td></tr>
+  {% endif %}
+  {% if bank and bank.bic %}
+    <tr><td class="k">BIC</td><td class="v mono">{{ bank.bic }}</td></tr>
+  {% endif %}
+  {% if bank and bank.bank_name %}
+    <tr><td class="k">{{ t('Banka', 'Bank') }}</td><td class="v">{{ bank.bank_name }}</td></tr>
+  {% endif %}
+  {% if invoice.project_name %}
+    <tr><td class="k">{{ t('Zakázka', 'Project') }}</td><td class="v">{{ invoice.project_name }}</td></tr>
+  {% endif %}
+  {% if invoice.project_number %}
+    <tr><td class="k">{{ t('Vaše číslo', 'Your order no.') }}</td><td class="v mono">{{ invoice.project_number }}</td></tr>
+  {% endif %}
+  {% if invoice.contract_number %}
+    <tr><td class="k">{{ t('Vaše smlouva', 'Your contract') }}</td><td class="v mono">{{ invoice.contract_number }}</td></tr>
   {% endif %}
 </table>
+{% endif %}
 
 {% if invoice.note_above_items %}
 <div class="note">{{ invoice.note_above_items|nl2br }}</div>
@@ -180,11 +180,6 @@
   <tbody>
     {% for item in invoice.items %}
     <tr{% if item.item_kind == 'discount' %} class="discount-row"{% endif %}>
-      {# Když má faktura výkaz víceprací, je proklikávací (podtržený) odkaz na stránku
-         s výkazem JEN položka výkazu — tj. ta, jejíž popis odpovídá názvu výkazu
-         (work_report.title), s pojistkou na klíčové slovo „výkaz" / „work report".
-         Ostatní položky i slevové řádky zůstávají běžným textem. mPDF dělá interní
-         skok na <a name="work-report">. #}
       {%- set _wr_d = item.description|trim|lower -%}
       {%- set _is_wr_item = work_report and item.item_kind != 'discount'
             and (_wr_d == (work_report.title|default('')|trim|lower)
@@ -222,89 +217,21 @@
 </div>
 {% endif %}
 
-{# ─── SUMACE + QR/BANK ─── #}
+{# ─── SUMACE + QR / UHRAZENO / RAZÍTKO ─── #}
 <table class="totals">
   <tr>
     <td class="left">
-      <table style="width:100%;border-collapse:collapse;">
-        <tr>
-          <td style="vertical-align:top;padding-right:3mm;width:33mm;">
-            {% if qr_data_uri %}
-            <div class="qr-box">
-              <img src="{{ qr_data_uri }}" alt="QR" width="105" height="105">
-              <div class="qr-label">QR Pay</div>
-            </div>
-            {% endif %}
-          </td>
-          <td style="vertical-align:top;">
-            {% if is_paid %}
-            <table class="bank-frame paid-stamp">
-              <tr>
-                <td>
-                  <div class="bank-label" style="color:#2E7D32;">{{ t('UHRAZENO', 'PAID') }}</div>
-                  <div class="spacer-3">&nbsp;</div>
-                  <div class="bank-value" style="color:#2E7D32;">
-                    {%- if payment_method == 'card' -%}{{ t('Platba kartou online', 'Paid online by card') }}
-                    {%- elseif payment_method == 'cash' -%}{{ t('Hotově', 'Cash') }}
-                    {%- else -%}{{ t('Neplaťte prosím znovu', 'Do not pay again') }}{%- endif -%}
-                  </div>
-                  {% if invoice.paid_at %}
-                    <div class="spacer-2">&nbsp;</div>
-                    <div class="bank-meta-line">{{ t('Datum úhrady', 'Paid on') }}: {{ invoice.paid_at|date(date_format) }}</div>
-                  {% endif %}
-                </td>
-              </tr>
-            </table>
-            {% elseif payment_method == 'card' %}
-            <table class="bank-frame">
-              <tr>
-                <td>
-                  <div class="bank-label">{{ t('Způsob úhrady', 'Payment method') }}</div>
-                  <div class="spacer-3">&nbsp;</div>
-                  <div class="bank-value">{{ t('Platební karta', 'Card') }}</div>
-                  <div class="spacer-2">&nbsp;</div>
-                  <div class="bank-meta-line">{{ t('Bankovní převod ani QR se nepoužije.', 'Bank transfer and QR are not used.') }}</div>
-                </td>
-              </tr>
-            </table>
-            {% elseif payment_method == 'cash' %}
-            <table class="bank-frame">
-              <tr>
-                <td>
-                  <div class="bank-label">{{ t('Způsob úhrady', 'Payment method') }}</div>
-                  <div class="spacer-3">&nbsp;</div>
-                  <div class="bank-value">{{ t('Hotově', 'Cash') }}</div>
-                </td>
-              </tr>
-            </table>
-            {% elseif bank %}
-            <table class="bank-frame">
-              <tr>
-                <td>
-                  <div class="bank-label">{{ t('Bankovní spojení', 'Bank account') }}</div>
-                  <div class="spacer-3">&nbsp;</div>
-                  {% if bank.account_number %}
-                    <div class="bank-value">{{ bank.account_number }}{% if bank.bank_code %} / {{ bank.bank_code }}{% endif %}</div>
-                  {% endif %}
-                  {% if bank.iban %}
-                    <div class="bank-value">{{ bank.iban }}</div>
-                  {% endif %}
-                  {% if bank.bic or bank.bank_name %}
-                    <div class="spacer-2">&nbsp;</div>
-                  {% endif %}
-                  {% if bank.bic %}
-                    <div class="bank-meta-line">BIC: {{ bank.bic }}</div>
-                  {% endif %}
-                  {% if bank.bank_name %}
-                    <div class="bank-meta-line">{{ t('Banka', 'Bank') }}: {{ bank.bank_name }}</div>
-                  {% endif %}
-                </td>
-              </tr>
-            </table>
-            {% endif %}
-          </td>
-        </tr>
-      </table>
+      {% if is_paid %}
+        <div class="paid-badge">
+          <div class="pb-title">{{ t('UHRAZENO', 'PAID') }}</div>
+          {% if invoice.paid_at %}<div class="pb-meta">{{ t('Datum úhrady', 'Paid on') }}: {{ invoice.paid_at|date(date_format) }}</div>{% endif %}
+        </div>
+      {% elseif qr_data_uri %}
+        <div class="qr-box">
+          <img src="{{ qr_data_uri }}" alt="QR" width="105" height="105">
+          <div class="qr-label">{{ t('QR platba', 'QR payment') }}</div>
+        </div>
+      {% endif %}
     </td>
     <td class="right">
       <table class="totals-table">
@@ -321,7 +248,6 @@
         </tr>
         {% endif %}
         {% endfor %}
-        {# Souhrn jen při více sazbách; u jediné sazby by jen zopakoval per-sazbové řádky výše #}
         {% if invoice.vat_breakdown|length > 1 %}
         <tr class="subtotal">
           <td class="tot-label">{{ t('Celkem bez DPH', 'Total without VAT') }}</td>
@@ -357,6 +283,9 @@
         </tr>
         {% endif %}
       </table>
+      {% if signature_path %}
+      <div class="stamp-box"><img src="{{ signature_path }}" alt="{{ t('Razítko', 'Stamp') }}"></div>
+      {% endif %}
     </td>
   </tr>
 </table>
@@ -386,7 +315,6 @@
   </tr>
   {% endif %}
   {% endfor %}
-  {# Souhrn jen při více sazbách; u jediné sazby by jen zopakoval per-sazbové řádky výše #}
   {% if invoice.czk_recap.breakdown|length > 1 %}
   <tr class="subtotal">
     <td class="tot-label">{{ t('Celkem bez DPH', 'Total without VAT') }}</td>
@@ -433,9 +361,6 @@
 <table class="head">
   <tr>
     {% if logo_show_name and logo_path and logo_path is not empty %}
-      {# Logo + název firmy: dvě SOUSEDNÍ buňky .head (žádná vnořená tabulka — ta v mPDF
-         mazala spodní čáru hlavičky). Mezeru dělá pevná šířka buňky loga: mPDF na buňce
-         respektuje `width`, ne padding. #}
       <td class="logo-img-cell"><img src="{{ logo_path }}" alt="logo"></td>
       <td class="logo-name">{{ supplier.display_name|default(supplier.company_name) }}</td>
     {% else %}
@@ -448,10 +373,9 @@
       </td>
     {% endif %}
     <td class="meta">
-      <div class="doc-type">{{ t('Výkaz víceprací', 'Work report') }}</div>
-      {% if invoice.varsymbol %}
-        <div class="varsymbol-big">{{ invoice.varsymbol }}</div>
-      {% endif %}
+      <table class="accent-bar"><tr><td>&nbsp;</td></tr></table>
+      <div class="doc-title">{{ t('Výkaz víceprací', 'Work report') }}</div>
+      {% if invoice.varsymbol %}<div class="doc-subtitle">{{ invoice.varsymbol }}</div>{% endif %}
     </td>
   </tr>
 </table>

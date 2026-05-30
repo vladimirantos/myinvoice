@@ -1,59 +1,51 @@
 /* MyInvoice.cz — CSS pro PDF render faktury (mPDF kompatibilní) */
 /* @page se NEPOUŽÍVÁ — A4 + margins jsou nastaveny v Mpdf konstruktoru. */
+/* Minimalistický redesign 2026-05: viz docs/superpowers/specs/2026-05-30-faktura-redesign-design.md */
+/* mPDF realita: žádný flexbox — layout přes <table>; dekorativní linky přes border
+   (ne přes prázdný div s background-height, ten mPDF nevykreslí spolehlivě). */
 
 body {
     font-family: 'DejaVu Sans', sans-serif;
     font-size: 10pt;
-    color: #15131D;
-    line-height: 1.4;
+    color: #1B1B1B;
+    line-height: 1.5;
     margin: 0;
     padding: 0;
 }
 
 * { box-sizing: border-box; }
 
+.nowrap { white-space: nowrap; }
+
+/* Spacery — mPDF v tabulkových buňkách neaplikuje margin/padding na <div> spolehlivě.
+   Používáme &nbsp; obsah + explicit font-size, aby div dostal zaručenou výšku. */
+.spacer-2 { font-size: 6pt; line-height: 1; }
+.spacer-3 { font-size: 9pt; line-height: 1; }
+.spacer-4 { font-size: 12pt; line-height: 1; }
+.spacer-5 { font-size: 15pt; line-height: 1; }
+
 /* ─── HLAVIČKA ─── */
 .head {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 7mm;
-    border-bottom: 1.5pt solid #3B2D83;
+    margin-bottom: 8mm;
 }
-/* Dobropis — červený header pro vizuální odlišení */
-.head.credit-note {
-    border-bottom-color: #D45B5B;
-}
-.head.credit-note .brand-name,
-.head.credit-note .doc-type {
-    color: #D45B5B;
-}
-.head.cancellation {
-    border-bottom-color: #7A748C;
-}
-.head.cancellation .brand-name,
-.head.cancellation .doc-type {
-    color: #7A748C;
-    text-decoration: line-through;
-}
-.head td { vertical-align: middle; padding-bottom: 4mm; }
+.head td { vertical-align: top; padding-bottom: 2mm; }
 td.logo { width: 55%; }
 td.logo img { max-width: 60mm; max-height: 20mm; }
-/* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name) — název je SOUSEDNÍ buňka
-   .head tabulky, ne vnořená tabulka (ta v mPDF rozbíjela border-collapse spodní čáru).
-   Logo-cell se zúží na obsah (width:1%) + padding-right = mezera k názvu. */
 /* Logo + název firmy vedle sebe (opt-in pdf_logo_show_name): dvě sousední buňky .head,
    žádná vnořená tabulka (ta v mPDF mazala spodní čáru hlavičky). Mezeru dělá pevná
    šířka buňky loga — mPDF na buňce respektuje `width`, ne padding. */
-td.logo-img-cell { width: 14mm; }
+td.logo-img-cell { width: 14mm; vertical-align: middle; }
 td.logo-img-cell img { max-width: 13mm; max-height: 18mm; }
 td.logo-name {
     white-space: nowrap;
     font-size: 14pt;
     font-weight: bold;
-    color: #15131D;
+    color: #1B1B1B;
     line-height: 1.2;
+    vertical-align: middle;
 }
-td.meta { width: 45%; text-align: right; }
 .brand-name {
     font-size: 16pt;
     font-weight: bold;
@@ -62,26 +54,43 @@ td.meta { width: 45%; text-align: right; }
     white-space: nowrap;
     letter-spacing: -0.2pt;
 }
-.doc-type {
-    font-size: 11pt;
-    font-weight: bold;
-    color: #3B2D83;
-    margin-bottom: 1mm;
-    line-height: 1.2;
-    white-space: nowrap;
+td.meta { width: 45%; text-align: right; }
+
+/* Akcentový pruh nad „Faktura" — vpravo zarovnaná 1-buňková tabulka (mPDF: margin-left:auto
+   funguje na tabulce, viz .czk-recap; border-top dělá linku spolehlivěji než bg-height). */
+table.accent-bar {
+    width: 46mm;
+    margin-top: 0;
+    margin-right: 0;
+    margin-bottom: 2.5mm;
+    margin-left: auto;
+    border-collapse: collapse;
 }
-.varsymbol-big {
-    font-size: 22pt;
+table.accent-bar td {
+    border-top: 1.1mm solid #3B2D83;
+    font-size: 0;
+    line-height: 0;
+    padding: 0;
+}
+.doc-title {
+    font-size: 18pt;
     font-weight: bold;
-    color: #15131D;
-    font-family: 'DejaVu Sans Mono', monospace;
-    line-height: 1.05;
-    letter-spacing: -0.5pt;
+    color: #1B1B1B;
+    line-height: 1.1;
+    white-space: nowrap;
+    letter-spacing: -0.3pt;
+}
+.doc-subtitle {
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.8pt;
+    color: #9A93A8;
+    margin-top: 1.4mm;
 }
 .parent-ref {
     font-size: 9pt;
     color: #7A748C;
-    margin-top: 1mm;
+    margin-top: 1.5mm;
 }
 .isdoc-badge {
     display: inline-block;
@@ -97,106 +106,119 @@ td.meta { width: 45%; text-align: right; }
     line-height: 1.4;
 }
 
-/* ─── STRANY (dodavatel / odběratel) ─── */
+/* Semantické varianty hlavičky (dobropis/storno) — přebarví akcentový pruh + titulek. */
+.head.credit-note table.accent-bar td { border-top-color: #D45B5B; }
+.head.credit-note .doc-title,
+.head.credit-note .brand-name { color: #D45B5B; }
+.head.cancellation table.accent-bar td { border-top-color: #7A748C; }
+.head.cancellation .doc-title,
+.head.cancellation .brand-name { color: #7A748C; text-decoration: line-through; }
+
+/* ─── STRANY (dodavatel / odběratel) — bez orámování, jen proužek + label ─── */
 .parties {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 5mm;
+    margin-bottom: 6mm;
 }
-.parties td {
+.parties > tbody > tr > td {
     width: 50%;
     vertical-align: top;
-    padding: 4mm;
-    border: 0.5pt solid #E7E3EE;
-    background: #FBFAFD;
+    padding: 0 8mm 0 0;
+    border: none;
+    background: none;
+}
+.parties > tbody > tr > td + td { padding: 0 0 0 8mm; }
+
+/* Malý fialový proužek nad labelem strany. */
+table.party-tick {
+    width: 8mm;
+    margin: 0 0 2mm 0;
+    border-collapse: collapse;
+}
+table.party-tick td {
+    border-top: 1mm solid #3B2D83;
+    font-size: 0;
+    line-height: 0;
+    padding: 0;
 }
 .parties h2 {
-    margin: 0 0 4mm;
-    font-size: 9pt;
+    margin: 0 0 2mm;
+    font-size: 8.5pt;
     text-transform: uppercase;
     letter-spacing: 1pt;
-    color: #6753AE;
+    color: #9A93A8;
     font-weight: bold;
 }
 .party-name {
     font-size: 12pt;
     font-weight: bold;
-    margin-bottom: 1mm;
-    line-height: 1.3;
-    color: #15131D;
+    margin-bottom: 0.5mm;
+    line-height: 1.35;
+    color: #1B1B1B;
 }
-.ic-dic {
-    font-family: 'DejaVu Sans Mono', monospace;
-    font-size: 9pt;
-    color: #5A5470;
-    margin-top: 5mm;
-    line-height: 1.6;
-}
+.party-addr { color: #6B6577; line-height: 1.55; }
 
-/* ─── METADATA ─── */
-.meta-grid {
+/* KV řádky uvnitř sloupce strany (label vlevo šedě / hodnota vpravo). */
+table.party-kv {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 5mm;
-    font-size: 9.5pt;
+    margin-top: 4mm;
+    font-size: 9pt;
 }
-.meta-grid td {
-    padding: 1.6mm 3mm;
+table.party-kv td { padding: 0.7mm 0; vertical-align: top; }
+table.party-kv td.k { color: #8F8A9B; white-space: nowrap; padding-right: 4mm; }
+table.party-kv td.v {
+    text-align: right;
+    font-weight: bold;
+    color: #1B1B1B;
+    font-family: 'DejaVu Sans Mono', monospace;
+}
+table.party-kv td.v.plain { font-family: 'DejaVu Sans', sans-serif; }
+
+/* ─── KOMPAKTNÍ METADATOVÝ PRUH (zbylá pole, jen vyplněná) ─── */
+table.meta-strip {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6mm;
+    font-size: 9pt;
+}
+table.meta-strip td {
+    padding: 1.5mm 4mm 1.5mm 0;
+    border-top: 0.5pt solid #ECEAF1;
     vertical-align: top;
-    border-bottom: 0.5pt solid #E7E3EE;
 }
-.meta-grid tr:last-child td {
-    border-bottom: none;
-}
-td.meta-label {
-    width: 32mm;
-    color: #6753AE;
-    font-size: 8.5pt;
-    font-weight: bold;
-    white-space: nowrap;
-    letter-spacing: 0.2pt;
-}
-td.meta-value {
-    font-weight: bold;
-    white-space: nowrap;
-}
-td.meta-value.mono { font-family: 'DejaVu Sans Mono', monospace; }
+table.meta-strip td.k { color: #8F8A9B; white-space: nowrap; width: 34mm; }
+table.meta-strip td.v { font-weight: bold; }
+table.meta-strip td.v.mono { font-family: 'DejaVu Sans Mono', monospace; }
 
-/* Univerzální — zákaz wrap pro číselné buňky */
-.nowrap { white-space: nowrap; }
-
-/* Spacery — mPDF v tabulkových buňkách neaplikuje margin/padding na <div> spolehlivě.
-   Používáme &nbsp; obsah + explicit font-size, aby div dostal zaručenou výšku. */
-.spacer-2 { font-size: 6pt; line-height: 1; }
-.spacer-3 { font-size: 9pt; line-height: 1; }
-.spacer-4 { font-size: 12pt; line-height: 1; }
-.spacer-5 { font-size: 15pt; line-height: 1; }
-
-/* ─── POLOŽKY ─── */
+/* ─── POLOŽKY — bílá hlavička s tenkou fialovou linkou ─── */
 table.items {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 5mm;
+    margin-top: 2mm;
+    margin-bottom: 6mm;
     font-size: 9pt;
 }
 table.items th {
-    background: #3B2D83;
-    color: #FFFFFF;
-    font-size: 8.5pt;
+    background: #FFFFFF;
+    color: #9A93A8;
+    font-size: 8pt;
     text-transform: uppercase;
     letter-spacing: 0.5pt;
-    padding: 2.8mm 2.5mm;
+    padding: 0 3mm 2.5mm 3mm;
     text-align: left;
     font-weight: 700;
+    border-bottom: 0.7pt solid #3B2D83;
+    white-space: nowrap;
 }
 table.items td {
-    padding: 2.8mm 2.5mm;
-    border-bottom: 0.3pt solid #E7E3EE;
+    padding: 3mm 3mm;
+    border-bottom: 0.3pt solid #ECEAF1;
     vertical-align: top;
 }
-table.items tr:nth-child(even) td { background: #FBFAFD; }
 table.items .num { text-align: right; font-family: 'DejaVu Sans Mono', monospace; }
 table.items .center { text-align: center; }
+table.items tr.discount-row td { color: #8F8A9B; }
 
 /* ─── SUMACE ─── */
 .totals {
@@ -205,45 +227,40 @@ table.items .center { text-align: center; }
     margin-bottom: 5mm;
 }
 .totals td { vertical-align: top; padding: 0; }
-.totals .left { width: 55%; padding-right: 4mm; }
-.totals .right { width: 45%; }
+.totals .left { width: 50%; padding-right: 6mm; }
+.totals .right { width: 50%; }
 
 table.totals-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 9.5pt;
 }
-table.totals-table td {
-    padding: 1.6mm 3mm;
-}
-td.tot-label {
-    color: #5A5470;
-    text-align: right;
-    font-weight: bold;
-}
+table.totals-table td { padding: 1.4mm 3mm; }
+td.tot-label { color: #6B6577; text-align: right; font-weight: bold; }
 td.tot-num {
     text-align: right;
     font-family: 'DejaVu Sans Mono', monospace;
-    width: 38mm;
+    width: 40mm;
     font-weight: bold;
 }
 table.totals-table tr.subtotal td {
     border-top: 0.5pt solid #D2CCDF;
     font-weight: 600;
 }
+/* Celkem — bez plné plochy: silná fialová linka nahoře + fialový text. */
 table.totals-table tr.grand td {
-    background: #3B2D83;
-    color: #FFFFFF;
-    font-size: 13pt;
+    background: #FFFFFF;
+    color: #3B2D83;
+    font-size: 14pt;
     font-weight: bold;
     padding: 3mm;
+    border-top: 1.2mm solid #3B2D83;
 }
-table.totals-table tr.grand td.tot-label { color: #FFFFFF; }
-table.totals-table tr.advance td { color: #5A5470; }
+table.totals-table tr.grand td.tot-label { color: #3B2D83; }
+table.totals-table tr.advance td { color: #6B6577; }
 table.totals-table tr.advance td.tot-label { font-style: italic; }
 table.totals-table tr.to-pay td {
-    border-top: 1pt solid #3B2D83;
-    background: #F4F2F8;
+    border-top: 0.8pt solid #3B2D83;
     font-weight: bold;
     font-size: 12pt;
     color: #3B2D83;
@@ -252,10 +269,44 @@ table.totals-table tr.to-pay td {
 table.totals-table tr.rate-note td.rate-note-cell {
     text-align: right;
     font-size: 8.5pt;
-    color: #5A5470;
+    color: #6B6577;
     font-style: italic;
     padding-top: 1.5mm;
 }
+
+/* ─── QR (bez rámečku) ─── */
+.qr-box { text-align: left; padding: 0; }
+.qr-box img { width: 32mm; height: 32mm; }
+.qr-box .qr-label {
+    font-size: 8pt;
+    color: #9A93A8;
+    text-transform: uppercase;
+    letter-spacing: 0.8pt;
+    font-weight: 700;
+    margin-top: 1.5mm;
+}
+
+/* Stav „UHRAZENO" (faktura je zaplacená — QR se nevykresluje). */
+.paid-badge {
+    display: inline-block;
+    padding: 2mm 4mm;
+    border: 0.6pt solid #2E7D32;
+    border-radius: 1.5mm;
+    color: #2E7D32;
+    font-size: 10pt;
+    line-height: 1.5;
+}
+.paid-badge .pb-title {
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1pt;
+    font-size: 10pt;
+}
+.paid-badge .pb-meta { font-size: 8.5pt; }
+
+/* ─── RAZÍTKO / PODPIS (vpravo dole) ─── */
+.stamp-box { text-align: right; margin-top: 6mm; }
+.stamp-box img { max-width: 55mm; max-height: 28mm; }
 
 /* ─── CZK přepočet (cizí měna) ─── */
 table.czk-recap {
@@ -264,12 +315,8 @@ table.czk-recap {
     margin-top: 5mm;
     border-collapse: collapse;
     font-size: 9pt;
-    background: #F2F2F2;
 }
-table.czk-recap td {
-    padding: 1.4mm 3mm;
-    background: #F2F2F2;
-}
+table.czk-recap td { padding: 1.4mm 3mm; }
 table.czk-recap td.czk-recap-title {
     font-size: 9.5pt;
     font-weight: bold;
@@ -279,83 +326,24 @@ table.czk-recap td.czk-recap-title {
 }
 .czk-recap-rate {
     font-weight: normal;
-    color: #5A5470;
+    color: #6B6577;
     font-size: 8.5pt;
     margin-left: 2mm;
 }
-table.czk-recap td.tot-label {
-    color: #5A5470;
-    text-align: right;
-    font-weight: bold;
-}
+table.czk-recap td.tot-label { color: #6B6577; text-align: right; font-weight: bold; }
 table.czk-recap td.tot-num {
     text-align: right;
     font-family: 'DejaVu Sans Mono', monospace;
     width: 32mm;
     font-weight: bold;
 }
-table.czk-recap tr.subtotal td {
-    border-top: 0.5pt solid #D2CCDF;
-    background: #EAEAEA;
-}
+table.czk-recap tr.subtotal td { border-top: 0.5pt solid #D2CCDF; }
 table.czk-recap tr.grand td {
-    background: #DCDCDC;
     color: #3B2D83;
-    font-size: 10.5pt;
+    font-size: 11pt;
     font-weight: bold;
     padding: 2mm 3mm;
-}
-
-/* ─── QR + bank ─── */
-table.bank-frame {
-    width: 100%;
-    border: 0.5pt solid #C9C0E9;
-    border-collapse: collapse;
-    border-radius: 2mm;
-}
-table.bank-frame td {
-    padding: 3mm;
-    font-size: 10pt;
-    line-height: 1.5;
-}
-.bank-label {
-    font-size: 9pt;
-    text-transform: uppercase;
-    letter-spacing: 0.8pt;
-    color: #6753AE;
-    font-weight: bold;
-    margin-bottom: 4mm;
-    line-height: 1.2;
-}
-.bank-value {
-    font-family: 'DejaVu Sans Mono', monospace;
-    font-weight: bold;
-    color: #15131D;
-    font-size: 9.5pt;
-    line-height: 1.5;
-    white-space: nowrap;
-}
-.bank-meta-line {
-    font-size: 9pt;
-    color: #5A5470;
-    line-height: 1.6;
-}
-
-.qr-box {
-    text-align: center;
-    padding: 2mm;
-    border: 1pt solid #D2CCDF;
-    border-radius: 2mm;
-    background: #FFFFFF;
-}
-.qr-box img { width: 35mm; height: 35mm; }
-.qr-box .qr-label {
-    font-size: 8pt;
-    color: #6753AE;
-    text-transform: uppercase;
-    letter-spacing: 1pt;
-    font-weight: 700;
-    margin-top: 1mm;
+    border-top: 0.8pt solid #3B2D83;
 }
 
 /* Notes a poznámky */
@@ -363,7 +351,7 @@ table.bank-frame td {
     margin: 4mm 0;
     padding: 3mm;
     background: #FBFAFD;
-    border-left: 2pt solid #6753AE;
+    border-left: 2pt solid #3B2D83;
     font-size: 9pt;
     color: #403B52;
 }
@@ -373,6 +361,10 @@ table.bank-frame td {
     color: #8B6420;
     font-weight: 600;
 }
+.proforma-note {
+    background: #FBFAFD;
+    border-left: 2pt solid #3B2D83;
+}
 
 /* Footer */
 .commercial-register {
@@ -381,42 +373,25 @@ table.bank-frame td {
     text-align: center;
     font-size: 8pt;
     color: #7A748C;
-    font-family: 'DejaVu Sans', sans-serif;
 }
 .footer {
     margin-top: 6mm;
     padding-top: 3mm;
-    border-top: 0.5pt solid #E7E3EE;
+    border-top: 0.5pt solid #ECEAF1;
     text-align: center;
     font-size: 8pt;
     color: #A7A0BA;
-    font-family: 'DejaVu Sans', sans-serif;
 }
-/* mPDF htmlpagefooter — attribution na patě KAŽDÉ stránky */
 .page-attribution {
     text-align: center;
     font-size: 7pt;
     color: #C5BFD3;
-    font-family: 'DejaVu Sans', sans-serif;
 }
-.page-attribution a {
-    color: #A7A0BA;
-    text-decoration: none;
-}
+.page-attribution a { color: #A7A0BA; text-decoration: none; }
 
 /* Stránkování — výkaz víceprací na nové straně */
 .page-break { page-break-before: always; }
 
 /* ─── VÝKAZ VÍCEPRACÍ ─── */
-/* Nadpis výkazu (byl inline ve šabloně — vytaženo do třídy kvůli branding override). */
-.wr-title {
-    font-size: 11pt;
-    font-weight: bold;
-    color: #3B2D83;
-    margin-bottom: 1mm;
-}
-/* Proklikávací popis položky faktury → odkaz na stránku s výkazem (podtržený). */
-.wr-link {
-    color: #3B2D83;
-    text-decoration: underline;
-}
+.wr-title { font-size: 11pt; font-weight: bold; color: #3B2D83; margin-bottom: 1mm; }
+.wr-link { color: #3B2D83; text-decoration: underline; }
