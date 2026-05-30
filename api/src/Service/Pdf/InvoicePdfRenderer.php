@@ -112,7 +112,8 @@ final class InvoicePdfRenderer
             'mode'              => 'utf-8',
             'format'            => 'A4',
             'margin_top'        => 15,
-            'margin_bottom'     => 18,
+            'margin_bottom'     => 26, // místo pro 3řádkovou patičku (živn. rejstřík + firma + attribution)
+            'margin_footer'     => 9,
             'margin_left'       => 15,
             'margin_right'      => 15,
             'tempDir'           => $tmpDir,

@@ -196,8 +196,8 @@ table.items {
     width: 100%;
     border-collapse: collapse;
     table-layout: fixed; /* striktně drží šířky sloupců → čísla se nezalamují */
-    margin-top: 9mm;
-    margin-bottom: 9mm;
+    margin-top: 14mm;
+    margin-bottom: 14mm;
     font-size: 9pt;
 }
 table.items th {
@@ -368,26 +368,28 @@ table.czk-recap tr.grand td {
     border-left: 2pt solid #3B2D83;
 }
 
-/* Footer */
-.commercial-register {
-    margin-top: 6mm;
-    margin-bottom: -4mm;
+/* Patička dole na stránce (mPDF htmlpagefooter): živn. rejstřík + firma·web·email
+   + attribution. Pinnutá na spodní okraj přes page-footer mechanismus. */
+.page-foot {
+    border-top: 0.5pt solid #ECEAF1;
+    padding-top: 2mm;
+}
+.page-commreg {
     text-align: center;
     font-size: 8pt;
     color: #7A748C;
 }
-.footer {
-    margin-top: 6mm;
-    padding-top: 3mm;
-    border-top: 0.5pt solid #ECEAF1;
+.page-supplier {
     text-align: center;
     font-size: 8pt;
     color: #A7A0BA;
+    margin-top: 0.5mm;
 }
 .page-attribution {
     text-align: center;
     font-size: 7pt;
     color: #C5BFD3;
+    margin-top: 1mm;
 }
 .page-attribution a { color: #A7A0BA; text-decoration: none; }
 
