@@ -103,11 +103,11 @@
       <div class="party-addr">{{ client.street }}</div>
       <div class="party-addr">{{ client.zip }} {{ client.city }}</div>
       <div class="party-addr">{{ locale == 'en' ? client.country_name_en : client.country_name_cs }}</div>
-      <table class="party-kv" align="right">
+      <table class="party-kv">
         {% if client.ic %}<tr><td class="k">{{ t('IČO', 'Reg. No.') }}</td><td class="v">{{ client.ic }}</td></tr>{% endif %}
         {% if client.dic %}<tr><td class="k">{{ t('DIČ', 'VAT ID') }}</td><td class="v">{{ client.dic }}</td></tr>{% endif %}
       </table>
-      <table class="party-kv" align="right">
+      <table class="party-kv">
         <tr><td class="k">{{ t('Datum vystavení', 'Issue date') }}</td><td class="v">{{ invoice.issue_date|date(date_format) }}</td></tr>
         <tr><td class="k">{{ t('Datum splatnosti', 'Due date') }}</td><td class="v">{{ invoice.due_date|date(date_format) }}</td></tr>
         {% if supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma' %}
