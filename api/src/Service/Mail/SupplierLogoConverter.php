@@ -46,7 +46,7 @@ final class SupplierLogoConverter
      * @return array{logo_path: string, abs_path: string, width: int, height: int}
      * @throws \RuntimeException Pro user-facing chyby (přepošleme jako HTTP 4xx)
      */
-    public function process(string $sourcePath, int $supplierId): array
+    public function process(string $sourcePath, int $supplierId, string $subdir = 'supplier-logos'): array
     {
         if (!is_file($sourcePath)) {
             throw new \RuntimeException('Source soubor nenalezen.');
@@ -61,7 +61,7 @@ final class SupplierLogoConverter
 
         $mime = $this->detectMime($sourcePath);
 
-        $targetDir  = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos');
+        $targetDir  = \MyInvoice\Infrastructure\Config\RuntimePaths::storage($subdir);
         $targetPath = $targetDir . '/sup-' . $supplierId . '.png';
         if (!is_dir($targetDir)) {
             @mkdir($targetDir, 0755, true);
@@ -96,8 +96,10 @@ final class SupplierLogoConverter
             throw new \RuntimeException('Konverze loga selhala (output není validní obrázek).');
         }
 
+        $rel = 'storage/' . $subdir . '/sup-' . $supplierId . '.png';
         return [
-            'logo_path' => 'storage/supplier-logos/sup-' . $supplierId . '.png',
+            'logo_path' => $rel,   // BC alias
+            'path'      => $rel,   // generický klíč (logo i razítko)
             'abs_path'  => $targetPath,
             'width'     => (int) $info[0],
             'height'    => (int) $info[1],
@@ -105,11 +107,11 @@ final class SupplierLogoConverter
     }
 
     /**
-     * Smaže logo (PNG i případný SVG sidecar) pro daného supplier — idempotentní.
+     * Smaže obrázek (PNG i případný SVG sidecar) pro daného supplier — idempotentní.
      */
-    public function delete(int $supplierId): void
+    public function delete(int $supplierId, string $subdir = 'supplier-logos'): void
     {
-        $base = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-logos') . '/sup-' . $supplierId;
+        $base = \MyInvoice\Infrastructure\Config\RuntimePaths::storage($subdir) . '/sup-' . $supplierId;
         foreach (['.png', '.svg'] as $ext) {
             if (is_file($base . $ext)) @unlink($base . $ext);
         }

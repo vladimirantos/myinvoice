@@ -46,6 +46,7 @@ export interface Supplier {
   email_accent_color: string  // #RRGGBB
   pdf_logo_show_name: boolean // vedle loga v PDF zobrazit i název firmy (migrace 0058)
   has_email_logo?: boolean    // server flag (existence storage/supplier-logos/sup-{id}.png)
+  has_signature?: boolean     // server flag (existence storage/supplier-signatures/sup-{id}.png)
   // Tax settings pro EPO výkazy DPH/KH (migrace 0038, fáze 6)
   taxpayer_type?: 'fo' | 'po' | null
   vat_period?: 'monthly' | 'quarterly' | null
@@ -164,6 +165,17 @@ export const settingsApi = {
     ).then(r => r.data)
   },
   deleteEmailLogo: () => api.delete('/settings/email-branding/logo').then(r => r.data),
+  // Razítko / podpis (PDF faktury, vpravo dole)
+  uploadSignature: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<{ signature_path: string; width: number; height: number }>(
+      '/settings/email-branding/signature',
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    ).then(r => r.data)
+  },
+  deleteSignature: () => api.delete('/settings/email-branding/signature').then(r => r.data),
   // Vrací HTML string — frontend ho pak nacpe do iframe.srcdoc (obejde X-Frame-Options DENY).
   emailPreviewHtml: (locale: 'cs' | 'en' = 'cs') =>
     api.get<string>(`/settings/email-branding/preview?locale=${locale}`, { responseType: 'text', transformResponse: [(d) => d] }).then(r => r.data),

@@ -129,6 +129,94 @@ final class EmailBrandingAction
         return Json::ok($response, ['deleted' => true]);
     }
 
+    /** POST /api/settings/email-branding/signature — razítko/podpis (PNG/JPG/SVG) do PDF faktury */
+    public function uploadSignature(Request $request, Response $response): Response
+    {
+        if (!$this->isAdmin($request)) {
+            return Json::error($response, 'forbidden', 'Pouze admin smí měnit branding.', 403);
+        }
+        $sid = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        if ($sid <= 0) {
+            return Json::error($response, 'no_supplier', 'Žádný supplier scope.', 400);
+        }
+
+        $files = $request->getUploadedFiles();
+        $file = $files['file'] ?? null;
+        if (!$file instanceof UploadedFileInterface) {
+            return Json::error($response, 'no_file', 'Žádný soubor nebyl odeslán (pole `file`).', 400);
+        }
+        if ($file->getError() !== UPLOAD_ERR_OK) {
+            return Json::error($response, 'upload_failed', 'Nahrání selhalo (kód ' . $file->getError() . ').', 400);
+        }
+        $size = (int) ($file->getSize() ?? 0);
+        if ($size <= 0) {
+            return Json::error($response, 'empty_file', 'Soubor je prázdný.', 400);
+        }
+        if ($size > self::MAX_FILE_SIZE) {
+            return Json::error($response, 'file_too_large', 'Soubor je příliš velký (max 1 MiB).', 413);
+        }
+
+        $tmpDir = sys_get_temp_dir();
+        if (!is_writable($tmpDir)) {
+            $tmpDir = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('supplier-signatures');
+            if (!is_dir($tmpDir)) @mkdir($tmpDir, 0755, true);
+        }
+        $tmpPath = $tmpDir . '/.upload-' . bin2hex(random_bytes(8));
+        try {
+            $file->moveTo($tmpPath);
+        } catch (\Throwable $e) {
+            return Json::error($response, 'move_failed', 'Nepodařilo se přesunout soubor: ' . $e->getMessage(), 500);
+        }
+
+        try {
+            $result = $this->converter->process($tmpPath, $sid, 'supplier-signatures');
+        } catch (\RuntimeException $e) {
+            @unlink($tmpPath);
+            return Json::error($response, 'conversion_failed', $e->getMessage(), 400);
+        } finally {
+            @unlink($tmpPath);
+        }
+
+        $this->db->pdo()->prepare('UPDATE supplier SET signature_path = ? WHERE id = ?')
+            ->execute([$result['path'], $sid]);
+
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log('supplier.signature_uploaded', $userId, 'supplier', $sid, [
+            'width'  => $result['width'],
+            'height' => $result['height'],
+        ], $ip, $request->getHeaderLine('User-Agent'));
+
+        return Json::ok($response, [
+            'signature_path' => $result['path'],
+            'width'          => $result['width'],
+            'height'         => $result['height'],
+        ]);
+    }
+
+    /** DELETE /api/settings/email-branding/signature */
+    public function deleteSignature(Request $request, Response $response): Response
+    {
+        if (!$this->isAdmin($request)) {
+            return Json::error($response, 'forbidden', 'Pouze admin smí měnit branding.', 403);
+        }
+        $sid = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        if ($sid <= 0) {
+            return Json::error($response, 'no_supplier', 'Žádný supplier scope.', 400);
+        }
+
+        $this->converter->delete($sid, 'supplier-signatures');
+        $this->db->pdo()->prepare('UPDATE supplier SET signature_path = NULL WHERE id = ?')->execute([$sid]);
+
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        $userId = isset($user['id']) ? (int) $user['id'] : null;
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log('supplier.signature_deleted', $userId, 'supplier', $sid, [], $ip, $request->getHeaderLine('User-Agent'));
+
+        return Json::ok($response, ['deleted' => true]);
+    }
+
     /**
      * GET /api/settings/email-branding/preview?locale=cs
      *

@@ -248,6 +248,44 @@ async function removeLogo() {
   }
 }
 
+// Razítko / podpis (PDF faktury, vpravo dole)
+const signatureFileInput = ref<HTMLInputElement | null>(null)
+const signatureUploading = ref(false)
+function pickSignature() { signatureFileInput.value?.click() }
+async function onSignatureSelected(ev: Event) {
+  const f = (ev.target as HTMLInputElement).files?.[0]
+  if (!f || !supplier.value) return
+  if (f.size > 1_048_576) {
+    toast.error(t('settings.branding_logo_too_large'))
+    if (signatureFileInput.value) signatureFileInput.value.value = ''
+    return
+  }
+  signatureUploading.value = true
+  try {
+    const result = await settingsApi.uploadSignature(f)
+    supplier.value.signature_path = result.signature_path
+    supplier.value.has_signature = true
+    toast.success(t('settings.branding_signature_uploaded'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  } finally {
+    signatureUploading.value = false
+    if (signatureFileInput.value) signatureFileInput.value.value = ''
+  }
+}
+async function removeSignature() {
+  if (!supplier.value) return
+  if (!window.confirm(t('settings.branding_signature_remove_confirm'))) return
+  try {
+    await settingsApi.deleteSignature()
+    supplier.value.signature_path = null
+    supplier.value.has_signature = false
+    toast.success(t('settings.branding_signature_removed'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
 function startEditCurrency(c: CurrencyAccount) {
   editingCurrency.value = c.id
   editingCurrencyLabel.value = c.label
@@ -677,6 +715,25 @@ async function removeCurrency(c: CurrencyAccount) {
                 <span class="text-sm text-neutral-700">{{ t('settings.branding_logo_show_name') }}</span>
               </label>
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.branding_logo_show_name_hint') }}</p>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.branding_signature') }}</label>
+              <p class="text-xs text-neutral-500 mb-2">{{ t('settings.branding_signature_hint') }}</p>
+              <div class="flex items-center gap-3">
+                <button
+                  @click="pickSignature" type="button"
+                  :disabled="signatureUploading || !supplier.email_branding_enabled"
+                  class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                  {{ signatureUploading ? t('common.loading') : (supplier.has_signature ? t('settings.branding_signature_replace') : t('settings.branding_signature_upload')) }}
+                </button>
+                <button
+                  v-if="supplier.has_signature" @click="removeSignature" type="button"
+                  class="cursor-pointer text-sm text-danger-600 hover:text-danger-700">
+                  {{ t('common.remove') }}
+                </button>
+                <input ref="signatureFileInput" @change="onSignatureSelected" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" />
+              </div>
             </div>
 
             <div>

@@ -441,6 +441,8 @@ final class Routes
         // Email branding (M16) — per-supplier logo + accent color v hlavičce odchozích emailů
         $app->post   ('/api/settings/email-branding/logo',            [EmailBrandingAction::class, 'uploadLogo']);
         $app->delete ('/api/settings/email-branding/logo',            [EmailBrandingAction::class, 'deleteLogo']);
+        $app->post   ('/api/settings/email-branding/signature',       [EmailBrandingAction::class, 'uploadSignature']);
+        $app->delete ('/api/settings/email-branding/signature',       [EmailBrandingAction::class, 'deleteSignature']);
         $app->get    ('/api/settings/email-branding/preview',         [EmailBrandingAction::class, 'preview']);
 
         $app->get    ('/api/settings/units',                          [SettingsAction::class, 'listUnits']);
