@@ -58,20 +58,16 @@ td.meta { width: 45%; text-align: right; }
 
 /* Akcentový pruh nad „Faktura" — vpravo zarovnaná 1-buňková tabulka (mPDF: margin-left:auto
    funguje na tabulce, viz .czk-recap; border-top dělá linku spolehlivěji než bg-height). */
-table.accent-bar {
+/* Block div s border-bottom + width + margin-left:auto — jediná varianta, kterou
+   mPDF u prázdného prvku honoruje na plnou šířku vpravo (ověřeno probe; table i
+   inline-block kolabují na obsah). */
+.accent-bar {
     width: 46mm;
-    table-layout: fixed; /* jinak mPDF u skoro prázdné buňky šířku zkolabuje na obsah */
-    margin-top: 0;
-    margin-right: 0;
-    margin-bottom: 2.5mm;
-    margin-left: auto;
-    border-collapse: collapse;
-}
-table.accent-bar td {
-    border-top: 0.8mm solid #3B2D83;
+    border-bottom: 0.8mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
-    padding: 0;
+    margin-left: auto;
+    margin-bottom: 2.5mm;
 }
 .doc-title {
     font-size: 18pt;
@@ -108,10 +104,10 @@ table.accent-bar td {
 }
 
 /* Semantické varianty hlavičky (dobropis/storno) — přebarví akcentový pruh + titulek. */
-.head.credit-note table.accent-bar td { border-top-color: #D45B5B; }
+.head.credit-note .accent-bar { border-bottom-color: #D45B5B; }
 .head.credit-note .doc-title,
 .head.credit-note .brand-name { color: #D45B5B; }
-.head.cancellation table.accent-bar td { border-top-color: #7A748C; }
+.head.cancellation .accent-bar { border-bottom-color: #7A748C; }
 .head.cancellation .doc-title,
 .head.cancellation .brand-name { color: #7A748C; text-decoration: line-through; }
 
@@ -131,17 +127,13 @@ table.accent-bar td {
 .parties > tbody > tr > td + td { padding: 0 0 0 8mm; }
 
 /* Malý fialový proužek nad labelem strany. */
-table.party-tick {
+/* Stejný princip jako .accent-bar, jen vlevo zarovnaný a kratší. */
+.party-tick {
     width: 9mm;
-    table-layout: fixed; /* viz accent-bar — drží šířku v mPDF */
-    margin: 0 0 2mm 0;
-    border-collapse: collapse;
-}
-table.party-tick td {
-    border-top: 0.8mm solid #3B2D83;
+    border-bottom: 0.8mm solid #3B2D83;
     font-size: 0;
     line-height: 0;
-    padding: 0;
+    margin-bottom: 2mm;
 }
 .parties h2 {
     margin: 0 0 2mm;

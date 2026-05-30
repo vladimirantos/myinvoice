@@ -56,7 +56,7 @@
       </td>
     {% endif %}
     <td class="meta">
-      <table class="accent-bar"><tr><td>&nbsp;</td></tr></table>
+      <div class="accent-bar">&nbsp;</div>
       <div class="doc-title">{{ doc_title }}</div>
       {% if doc_subtitle %}<div class="doc-subtitle">{{ doc_subtitle }}</div>{% endif %}
       {% if parent_varsymbol %}
@@ -73,7 +73,7 @@
 <table class="parties">
   <tr>
     <td>
-      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
+      <div class="party-tick">&nbsp;</div>
       <h2>{{ t('Dodavatel', 'Supplier') }}</h2>
       <div class="party-name">{{ supplier.company_name }}</div>
       {% if supplier.display_name and supplier.display_name != supplier.company_name %}
@@ -93,7 +93,7 @@
       </table>
     </td>
     <td>
-      <table class="party-tick"><tr><td>&nbsp;</td></tr></table>
+      <div class="party-tick">&nbsp;</div>
       <h2>{{ t('Odběratel', 'Customer') }}</h2>
       <div class="party-name">{{ client.company_name }}</div>
       {% if client.first_name or client.last_name %}
@@ -373,7 +373,7 @@
       </td>
     {% endif %}
     <td class="meta">
-      <table class="accent-bar"><tr><td>&nbsp;</td></tr></table>
+      <div class="accent-bar">&nbsp;</div>
       <div class="doc-title">{{ t('Výkaz víceprací', 'Work report') }}</div>
       {% if invoice.varsymbol %}<div class="doc-subtitle">{{ invoice.varsymbol }}</div>{% endif %}
     </td>
