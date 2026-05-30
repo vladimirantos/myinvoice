@@ -119,8 +119,7 @@
 
 {# ─── KOMPAKTNÍ METADATOVÝ PRUH (zbylá pole) ─── #}
 {%- set show_meta_strip = (invoice.currency != 'CZK')
-    or (supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma')
-    or (bank and bank.bic) or (bank and bank.bank_name)
+    or (bank and bank.bic)
     or invoice.project_name or invoice.project_number or invoice.contract_number
     or (not supplier.is_vat_payer) -%}
 {% if show_meta_strip %}
@@ -131,14 +130,8 @@
   {% if invoice.currency != 'CZK' %}
     <tr><td class="k">{{ t('Měna', 'Currency') }}</td><td class="v mono">{{ invoice.currency }}</td></tr>
   {% endif %}
-  {% if supplier.is_vat_payer and invoice.tax_date and invoice.invoice_type != 'proforma' %}
-    <tr><td class="k">{{ t('Konst. symbol', 'Const. symbol') }}</td><td class="v mono">0308</td></tr>
-  {% endif %}
   {% if bank and bank.bic %}
     <tr><td class="k">BIC</td><td class="v mono">{{ bank.bic }}</td></tr>
-  {% endif %}
-  {% if bank and bank.bank_name %}
-    <tr><td class="k">{{ t('Banka', 'Bank') }}</td><td class="v">{{ bank.bank_name }}</td></tr>
   {% endif %}
   {% if invoice.project_name %}
     <tr><td class="k">{{ t('Zakázka', 'Project') }}</td><td class="v">{{ invoice.project_name }}</td></tr>

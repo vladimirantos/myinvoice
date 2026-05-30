@@ -120,11 +120,11 @@ hr.accent-bar {
 .parties > tbody > tr > td {
     width: 50%;
     vertical-align: top;
-    padding: 0 8mm 0 0;
+    padding: 0 14mm 0 0;
     border: none;
     background: none;
 }
-.parties > tbody > tr > td + td { padding: 0 0 0 8mm; }
+.parties > tbody > tr > td + td { padding: 0 0 0 14mm; }
 
 /* Malý fialový proužek nad labelem strany. */
 /* Proužek nad labelem strany — kontrolovaná délka přes <td width="N"> (HTML
