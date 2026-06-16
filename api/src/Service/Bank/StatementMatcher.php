@@ -6,6 +6,9 @@ namespace MyInvoice\Service\Bank;
 
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Invoice\FinalFromProformaCreator;
+use MyInvoice\Service\Invoice\InvoicePaymentService;
+use MyInvoice\Service\Invoice\PaymentTaxDocumentCreator;
+use MyInvoice\Service\Mail\PaymentThanksMailer;
 use PDO;
 
 /**
@@ -47,6 +50,19 @@ final class StatementMatcher
     public function __construct(
         private readonly Connection $db,
         private readonly FinalFromProformaCreator $finalCreator,
+        // Volitelný — automatické cesty (GPC import, e-mailové avízo, cron, rescan) jdou
+        // přes match() (ne přes MarkPaidAction/manualMatch), takže děkovný e-mail za úhradu
+        // se musí poslat odsud. Nullable kvůli izolovaným konstrukcím v testech/skriptech;
+        // produkční wiring (Bootstrap) ho vždy injektuje. Viz #127.
+        private readonly ?PaymentThanksMailer $paymentThanks = null,
+        // Evidence plateb (#89) — exact/partial match příchozí platby vytváří záznam
+        // v invoice_payments (N:1, idempotentně přes UNIQUE bank_transaction_id).
+        // Nullable kvůli izolovaným konstrukcím v testech; bez service běží legacy
+        // chování (přímý UPDATE statusu, bez payment řádků). Bootstrap injektuje vždy.
+        private readonly ?InvoicePaymentService $payments = null,
+        // Daňový doklad k přijaté platbě — auto DRAFT při částečné úhradě proformy
+        // (jen plátce DPH, ne-RC; creator si podmínky hlídá sám, viz catch níže).
+        private readonly ?PaymentTaxDocumentCreator $taxDocCreator = null,
     ) {}
 
     /**
@@ -56,18 +72,21 @@ final class StatementMatcher
      *
      * @return array{expected: float, exact: float, partial: float}|null
      */
-    private function expectedMatch(float $invoiceAmount, string $invoiceCcy, float $rate, ?string $txCurrency): ?array
+    private function expectedMatch(float $invoiceAmount, string $invoiceCcy, float $rate, ?string $txCurrency, ?float $exactTolerance = null): ?array
     {
+        $exact = $exactTolerance !== null && $exactTolerance >= 0.0
+            ? $exactTolerance
+            : self::EXACT_MATCH_TOLERANCE;
         // Neznámá měna transakce (legacy výpisy) nebo shodná měna → přímé porovnání.
         if ($txCurrency === null || strtoupper($txCurrency) === strtoupper($invoiceCcy)) {
-            return ['expected' => $invoiceAmount, 'exact' => self::EXACT_MATCH_TOLERANCE, 'partial' => self::PARTIAL_MATCH_TOLERANCE];
+            return ['expected' => $invoiceAmount, 'exact' => $exact, 'partial' => max($exact, self::PARTIAL_MATCH_TOLERANCE)];
         }
         // Tuzemská platba cizoměnové faktury → přepočet kurzem faktury (CZK = částka × kurz).
         // Relativní tolerance kvůli kurzovému driftu; partial tier zde nemá smysl (= exact).
         if (strtoupper($txCurrency) === self::LOCAL_CURRENCY) {
             $r = $rate > 0 ? $rate : 1.0;
             $czk = $invoiceAmount * $r;
-            $tol = max(self::EXACT_MATCH_TOLERANCE, $czk * self::FX_MATCH_TOLERANCE_PCT);
+            $tol = max($exact, $czk * self::FX_MATCH_TOLERANCE_PCT);
             return ['expected' => $czk, 'exact' => $tol, 'partial' => $tol];
         }
         // Cizoměnový účet × jiná měna faktury (např. EUR výpis × CZK/USD faktura) — skip.
@@ -104,21 +123,36 @@ final class StatementMatcher
         // Outgoing (amount < 0) → match na purchase_invoice (přijatou) — fáze 3.
         // Incoming (amount > 0) → match na invoice (vydanou) — existing flow.
         $isOutgoing = $amount < 0;
+        $exactTolerance = isset($row['match_tolerance']) && $row['match_tolerance'] !== null
+            ? max(0.0, (float) $row['match_tolerance'])
+            : null;
 
         // Určení supplier_id z bank účtu (currencies.account_number + bank_code).
         // Normalizace přes AccountNumberNormalizer (řeší zero-padding a prefix).
+        // Porovnává se i domácí část IBANu (#109) — cizoměnové účty bývají evidované
+        // jen IBANem (viz schema currencies), GPC ale nese domácí číslo účtu; bez toho
+        // EUR výpis skončil jako unknown_supplier_for_account a nikdy se nespároval.
         $supplierId = 0;
         if (!empty($row['recipient_account'])) {
-            $sql = 'SELECT supplier_id, account_number FROM currencies WHERE account_number IS NOT NULL';
-            $params = [];
-            if (!empty($row['recipient_bank'])) {
-                $sql .= ' AND bank_code = ?';
-                $params[] = $row['recipient_bank'];
-            }
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($params);
+            $stmt = $pdo->query(
+                'SELECT supplier_id, account_number, iban, bank_code FROM currencies
+                  WHERE account_number IS NOT NULL OR iban IS NOT NULL'
+            );
             foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $candidate) {
-                if (AccountNumberNormalizer::equals((string) $candidate['account_number'], (string) $row['recipient_account'])) {
+                $iban = isset($candidate['iban']) && is_string($candidate['iban']) ? $candidate['iban'] : null;
+                // Bank code filter (jen když výpis kód banky nese): kandidátův kód
+                // z bank_code sloupce, případně z IBANu. Neznámý kód nevyřazuje —
+                // radši porovnat číslo účtu než ztratit IBAN-only řádek.
+                if (!empty($row['recipient_bank'])) {
+                    $candidateBank = (string) ($candidate['bank_code'] ?? '');
+                    if ($candidateBank === '' && $iban !== null) {
+                        $candidateBank = (string) AccountNumberNormalizer::czechIbanBankCode($iban);
+                    }
+                    if ($candidateBank !== '' && $candidateBank !== (string) $row['recipient_bank']) {
+                        continue;
+                    }
+                }
+                if (AccountNumberNormalizer::matchesAny((string) $row['recipient_account'], $candidate['account_number'] ?? null, $iban)) {
                     $supplierId = (int) $candidate['supplier_id'];
                     break;
                 }
@@ -157,22 +191,69 @@ final class StatementMatcher
         // porovnáváme v měně transakce — u cizoměnové faktury placené z CZK účtu přes
         // kurz faktury (viz expectedMatch). Nebezpečný případ (EUR výpis × CZK faktura
         // stejného VS+amount) expectedMatch vrátí null → zůstane unmatched.
-        $sql = "SELECT i.id, i.varsymbol, i.amount_to_pay, i.exchange_rate, i.status, i.invoice_type, cur.code AS currency
+        // VS match: 1) přesná shoda (rychlá cesta pro čistě číselné VS), 2) numerická
+        // shoda po normalizaci — `invoices.varsymbol` slouží i jako číslo dokladu, takže
+        // může nést pomlčku/lomítko (např. „2026-00001"), zatímco banka pošle jen číslice
+        // („202600001"). CAST(REGEXP_REPLACE(...) AS UNSIGNED) zrcadlí
+        // VariableSymbolNormalizer::forMatching (číslice bez vodicích nul). REGEXP '[1-9]'
+        // vyřadí prázdné / samé-nuly varsymboly (CAST '' → 0), aby nevznikla planá shoda.
+        $vsDigits = VariableSymbolNormalizer::digits((string) $vs);
+        $sql = "SELECT i.id, i.varsymbol, i.amount_to_pay, i.paid_total, i.exchange_rate, i.status, i.invoice_type, cur.code AS currency
                   FROM invoices i
                   JOIN currencies cur ON cur.id = i.currency_id
                  WHERE i.supplier_id = ?
-                   AND i.varsymbol = ?
+                   AND (i.varsymbol = ?
+                        OR (i.varsymbol REGEXP '[1-9]'
+                            AND CAST(REGEXP_REPLACE(i.varsymbol, '[^0-9]', '') AS UNSIGNED) = CAST(? AS UNSIGNED)))
                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
                    AND i.invoice_type IN ('invoice', 'proforma')
                  LIMIT 1";
         $stmt = $pdo->prepare($sql);
-        $stmt->execute([$supplierId, $vs]);
+        $stmt->execute([$supplierId, $vs, $vsDigits]);
         $inv = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$inv) {
             return ['status' => 'unmatched', 'reason' => 'no_invoice_with_vs', 'tx_currency' => $txCurrency];
         }
 
-        $m = $this->expectedMatch((float) $inv['amount_to_pay'], (string) $inv['currency'], (float) ($inv['exchange_rate'] ?: 0), $txCurrency);
+        // Spárovaná proforma (existuje nestornovaný finál): pohledávku nese FINÁL —
+        // doplatek poslaný pod VS proformy se přesměruje na něj. Platba na proformě
+        // by visela mimo dluh (receivable guard proformy s finálem vylučuje) a navíc
+        // by spustila daňový doklad k platbě, který už finál nikdy neodečte (§ 37a).
+        if (($inv['invoice_type'] ?? '') === 'proforma') {
+            $fin = $pdo->prepare(
+                "SELECT i.id, i.varsymbol, i.amount_to_pay, i.paid_total, i.exchange_rate, i.status, i.invoice_type, cur.code AS currency
+                   FROM invoices i
+                   JOIN currencies cur ON cur.id = i.currency_id
+                  WHERE i.parent_invoice_id = ? AND i.invoice_type = 'invoice'
+                    AND i.status IN ('issued', 'sent', 'reminded', 'paid')
+                  ORDER BY i.id LIMIT 1"
+            );
+            $fin->execute([(int) $inv['id']]);
+            $finRow = $fin->fetch(PDO::FETCH_ASSOC);
+            if ($finRow) {
+                $inv = $finRow;
+            }
+        }
+
+        // Idempotence (#89): transakce už jednou založila platbu (rematch bere i
+        // auto_partial) — nic znovu nevytvářet, jen reportovat stávající stav.
+        if ($this->payments !== null) {
+            $dup = $pdo->prepare('SELECT invoice_id FROM invoice_payments WHERE bank_transaction_id = ?');
+            $dup->execute([$transactionId]);
+            $dupInvoiceId = $dup->fetchColumn();
+            if ($dupInvoiceId !== false) {
+                return [
+                    'status'           => (string) ($row['match_status'] ?? 'auto_partial') ?: 'auto_partial',
+                    'invoice_id'       => (int) $dupInvoiceId,
+                    'already_recorded' => true,
+                ];
+            }
+        }
+
+        // Porovnáváme proti ZBÝVAJÍCÍ částce (amount_to_pay - paid_total) — dřívější
+        // částečné úhrady (jiné transakce, ruční záznamy) match nesmí rozbít (#89).
+        $remaining = round((float) $inv['amount_to_pay'] - (float) ($inv['paid_total'] ?? 0), 2);
+        $m = $this->expectedMatch($remaining, (string) $inv['currency'], (float) ($inv['exchange_rate'] ?: 0), $txCurrency, $exactTolerance);
         if ($m === null) {
             return ['status' => 'unmatched', 'reason' => 'currency_mismatch',
                     'tx_currency' => $txCurrency, 'invoice_currency' => $inv['currency']];
@@ -180,15 +261,35 @@ final class StatementMatcher
 
         $alreadyPaid = ($inv['status'] === 'paid');
         $diff = abs($amount - $m['expected']);
-        if ($diff <= $m['exact']) {
-            // Exact match — pokud faktura ještě není paid, označit ji a (u proformy) vyrobit final draft.
+        // Exact = doplacení v toleranci; drobný přeplatek do partial tier (≤ 1 Kč)
+        // bereme taky jako úhradu (zaeviduje se reálná částka, payment_status to ukáže).
+        $isExact = $diff <= $m['exact']
+            || (!$alreadyPaid && $amount > $m['expected'] && $diff <= $m['partial']);
+        if ($isExact) {
+            // Exact match — pokud faktura ještě není paid, zaevidovat platbu (service
+            // překlopí status + paid_at) a u proformy vyrobit final draft.
             // Pro již ručně paid fakturu jen navážeme transakci (status/paid_at netknuté).
             $pdo->beginTransaction();
             try {
                 if (!$alreadyPaid) {
-                    $pdo->prepare(
-                        "UPDATE invoices SET status = 'paid', paid_at = ? WHERE id = ?"
-                    )->execute([$row['posted_at'], $inv['id']]);
+                    if ($this->payments !== null) {
+                        $this->payments->recordPayment(
+                            (int) $inv['id'],
+                            $this->txAmountInInvoiceCurrency($amount, $inv, $txCurrency, $remaining),
+                            (string) $row['posted_at'],
+                            [
+                                'source'              => 'bank',
+                                'bank_transaction_id' => $transactionId,
+                                'variable_symbol'     => (string) $vs,
+                                'bank_reference'      => isset($row['bank_ref']) ? (string) $row['bank_ref'] : null,
+                            ],
+                        );
+                    } else {
+                        // Legacy fallback (izolované konstrukce bez payment service).
+                        $pdo->prepare(
+                            "UPDATE invoices SET status = 'paid', paid_at = ? WHERE id = ?"
+                        )->execute([$row['posted_at'], $inv['id']]);
+                    }
                 }
                 $pdo->prepare(
                     "UPDATE bank_transactions
@@ -198,12 +299,21 @@ final class StatementMatcher
 
                 $finalDraftId = null;
                 if (!$alreadyPaid && $inv['invoice_type'] === 'proforma') {
-                    $finalDraftId = $this->finalCreator->create((int) $inv['id'], 0);
+                    // DUZP finálního dokladu = den přijetí platby z výpisu, ne dnešek.
+                    $finalDraftId = $this->finalCreator->create((int) $inv['id'], 0, (string) $row['posted_at']);
                 }
                 $pdo->commit();
             } catch (\Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
+            }
+
+            // Děkovný e-mail za úhradu (#57/#127) — jen pro fakturu nově označenou jako
+            // paid (ne ručně paid, kterou jen navazujeme). Best-effort, mimo transakci:
+            // mailer si sám ohlídá enabled + auto_send (bank_match trigger) i idempotenci
+            // a nikdy nevyhazuje výjimku, takže selhání e-mailu nerozbije spárování.
+            if (!$alreadyPaid) {
+                $this->paymentThanks?->sendForInvoice((int) $inv['id'], 'bank_match', null, null, null, requireUnsent: true);
             }
 
             $result = ['status' => 'auto_exact', 'invoice_id' => (int) $inv['id'], 'varsymbol' => $vs];
@@ -215,8 +325,58 @@ final class StatementMatcher
             }
             return $result;
         }
+
+        // Podplatba (částečná úhrada, #89): VS sedí, částka je menší než zbývající.
+        // Zaeviduj platbu (faktura zůstává pohledávkou se sníženým zůstatkem) a u
+        // proformy vystav DRAFT daňového dokladu k přijaté platbě (plátce DPH, ne-RC).
+        if (!$alreadyPaid && $this->payments !== null && $amount < $m['expected'] - $m['exact']) {
+            $pdo->beginTransaction();
+            try {
+                $recorded = $this->payments->recordPayment(
+                    (int) $inv['id'],
+                    $this->txAmountInInvoiceCurrency($amount, $inv, $txCurrency, 0.0),
+                    (string) $row['posted_at'],
+                    [
+                        'source'              => 'bank',
+                        'bank_transaction_id' => $transactionId,
+                        'variable_symbol'     => (string) $vs,
+                        'bank_reference'      => isset($row['bank_ref']) ? (string) $row['bank_ref'] : null,
+                    ],
+                );
+                $pdo->prepare(
+                    "UPDATE bank_transactions
+                        SET matched_invoice_id = ?, match_status = 'auto_partial', matched_at = NOW()
+                      WHERE id = ?"
+                )->execute([$inv['id'], $transactionId]);
+
+                $taxDocId = null;
+                if ($inv['invoice_type'] === 'proforma' && $this->taxDocCreator !== null) {
+                    try {
+                        $taxDocId = $this->taxDocCreator->createForPayment((int) $recorded['payment_id'], 0);
+                    } catch (\RuntimeException) {
+                        // Neplátce DPH / reverse charge / jiná podmínka — doklad se nevystavuje.
+                    }
+                }
+                $pdo->commit();
+            } catch (\Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
+            }
+            $result = [
+                'status'          => 'auto_partial',
+                'invoice_id'      => (int) $inv['id'],
+                'partial_payment' => true,
+                'remaining'       => $recorded['remaining'],
+                'diff'            => $diff,
+            ];
+            if ($taxDocId !== null) {
+                $result['tax_document_id'] = $taxDocId;
+            }
+            return $result;
+        }
+
         if ($diff <= $m['partial']) {
-            // Partial match — flag, ale nepaint paid (uživatel rozhodne)
+            // Partial match (legacy fallback / již paid faktura) — flag, ale nepaint paid.
             $pdo->prepare(
                 "UPDATE bank_transactions
                     SET matched_invoice_id = ?, match_status = 'auto_partial', matched_at = NOW()
@@ -226,6 +386,25 @@ final class StatementMatcher
         }
 
         return ['status' => 'unmatched', 'reason' => 'amount_mismatch', 'expected' => $m['expected'], 'got' => $amount];
+    }
+
+    /**
+     * Částka transakce vyjádřená v měně faktury (pro záznam do invoice_payments).
+     * Stejná/neznámá měna → přímo; CZK platba cizoměnové faktury → děleno kurzem
+     * faktury (zrcadlí expectedMatch); jinak $fallback (typicky zbývající částka).
+     */
+    private function txAmountInInvoiceCurrency(float $txAmount, array $inv, ?string $txCurrency, float $fallback): float
+    {
+        $invCcy = strtoupper((string) $inv['currency']);
+        if ($txCurrency === null || strtoupper($txCurrency) === $invCcy) {
+            return round($txAmount, 2);
+        }
+        if (strtoupper($txCurrency) === self::LOCAL_CURRENCY) {
+            $r = (float) ($inv['exchange_rate'] ?: 0);
+            $r = $r > 0 ? $r : 1.0;
+            return round($txAmount / $r, 2);
+        }
+        return round($fallback, 2);
     }
 
     /**
@@ -245,17 +424,24 @@ final class StatementMatcher
         // je interní PF-YYYYMM-NNNN, jen občas se s `vendor_invoice_number` shodují
         // (když user nepoužívá auto-counter). Hledáme proto OR na obojí — uživatel může
         // platit pod naším PF-... i pod původním číslem dodavatele.
+        // Přesná shoda na náš VS i VS dodavatele + numerická shoda po normalizaci
+        // (číslo dokladu s pomlčkou „PF-2026-0001" × jen-číslice z banky). Viz match().
+        $vsDigits = VariableSymbolNormalizer::digits($vs);
         $sql = "SELECT pi.id, pi.varsymbol, pi.vendor_invoice_number,
                        COALESCE(pi.amount_to_pay, pi.total_with_vat, 0) AS amount_to_pay,
                        pi.exchange_rate, pi.status, cur.code AS currency
                   FROM purchase_invoices pi
              LEFT JOIN currencies cur ON cur.id = pi.currency_id
                  WHERE pi.supplier_id = ?
-                   AND (pi.varsymbol = ? OR pi.vendor_invoice_number = ?)
+                   AND (pi.varsymbol = ? OR pi.vendor_invoice_number = ?
+                        OR (pi.varsymbol REGEXP '[1-9]'
+                            AND CAST(REGEXP_REPLACE(pi.varsymbol, '[^0-9]', '') AS UNSIGNED) = CAST(? AS UNSIGNED))
+                        OR (pi.vendor_invoice_number REGEXP '[1-9]'
+                            AND CAST(REGEXP_REPLACE(pi.vendor_invoice_number, '[^0-9]', '') AS UNSIGNED) = CAST(? AS UNSIGNED)))
                    AND pi.status IN ('received', 'booked', 'paid')
                  LIMIT 1";
         $stmt = $pdo->prepare($sql);
-        $stmt->execute([$supplierId, $vs, $vs]);
+        $stmt->execute([$supplierId, $vs, $vs, $vsDigits, $vsDigits]);
         $pi = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$pi) {
             return ['status' => 'unmatched', 'reason' => 'no_purchase_with_vs', 'tx_currency' => $txCurrency];

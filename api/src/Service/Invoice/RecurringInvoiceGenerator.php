@@ -344,6 +344,17 @@ final class RecurringInvoiceGenerator
             ? null
             : self::computeTaxDate($issueDate, (string) ($template['tax_date_mode'] ?? 'same_as_issue'));
 
+        // Neplátce DPH → položky se přepnou na 0% osvobozenou sazbu (stejně jako u ručně
+        // vystavené faktury, viz InvoiceEditor.defaultVatRateId). Autoritativní záchrana i
+        // pro šablony uložené dřív s nominální sazbou (21 %) — bez toho by cron tiše vystavil
+        // fakturu s DPH u neplátce. Děje se PŘED guardem, aby se validovala coercnutá sazba.
+        $template['items'] = $this->coerceNonVatPayerRates(
+            $pdo,
+            (int) $template['supplier_id'],
+            $template['items'],
+            $taxDate ?? $issueDate,
+        );
+
         // Safeguard: přišpendlené sazby šablony musí být platné k DUZP (u proformy k issue).
         // Brání tichému vystavení se starou sazbou po její změně (nový řádek vat_rates).
         VatRateValidityGuard::assertValidOn(
@@ -352,23 +363,38 @@ final class RecurringInvoiceGenerator
             $taxDate ?? $issueDate,
         );
 
+        // Placeholdery {YYYY}/{MM}/{DATE±…}/… v popisech položek a poznámkách (#108) —
+        // vyhodnocují se VŽDY (neznámé tokeny zůstávají netknuté → plná zpětná
+        // kompatibilita), vůči DUZP (u proformy issue_date), stejně jako month-sync níže.
+        $placeholderRef = new \DateTimeImmutable($taxDate ?? $issueDate);
+        $lang = (string) ($template['language'] ?? 'cs');
+        $noteAbove = $template['note_above_items'] !== null && $template['note_above_items'] !== ''
+            ? DescriptionPlaceholders::apply((string) $template['note_above_items'], $placeholderRef, $lang)
+            : ($template['note_above_items'] ?? null);
+        $noteBelow = $template['note_below_items'] !== null && $template['note_below_items'] !== ''
+            ? DescriptionPlaceholders::apply((string) $template['note_below_items'], $placeholderRef, $lang)
+            : ($template['note_below_items'] ?? null);
+
         $pdo->beginTransaction();
         try {
             $discountPercent = round(max(0.0, min(100.0, (float) ($template['discount_percent'] ?? 0))), 2);
-            // Výchozí kategorie tržby — default zakázky > klienta (sdílený helper,
-            // stejná logika jako createDraft a import). Faktura ze šablony tak dostane
-            // kategorii stejně jako ručně založená.
+            // Kategorie tržby — pevná kategorie šablony (#119) přebíjí dynamický
+            // fallback default zakázky > klienta (sdílený helper, stejná logika jako
+            // createDraft a import). Hodnota se na fakturu ukládá jako snapshot:
+            // pozdější změna šablony/zakázky/klienta už vygenerované faktury nemění.
             $projectId = !empty($template['project_id']) ? (int) $template['project_id'] : null;
-            $revenueCategoryId = InvoiceRepository::resolveDefaultRevenueCategoryId(
-                $pdo, (int) $template['client_id'], $projectId
-            );
+            $revenueCategoryId = !empty($template['revenue_category_id'])
+                ? (int) $template['revenue_category_id']
+                : InvoiceRepository::resolveDefaultRevenueCategoryId(
+                    $pdo, (int) $template['client_id'], $projectId
+                );
             $stmt = $pdo->prepare(
                 'INSERT INTO invoices
                    (invoice_type, client_id, project_id, supplier_id,
-                    issue_date, tax_date, due_date, currency_id, reverse_charge, language,
+                    issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
                     note_above_items, note_below_items, payment_method, discount_percent,
                     recurring_template_id, revenue_category_id, status, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?)'
             );
             $stmt->execute([
                 $type,
@@ -380,9 +406,10 @@ final class RecurringInvoiceGenerator
                 $dueDate,
                 (int) $template['currency_id'],
                 $template['reverse_charge'] ? 1 : 0,
+                !empty($template['prices_include_vat']) ? 1 : 0,
                 (string) ($template['language'] ?? 'cs'),
-                $template['note_above_items'] ?? null,
-                $template['note_below_items'] ?? null,
+                $noteAbove,
+                $noteBelow,
                 (string) ($template['payment_method'] ?? 'bank_transfer'),
                 $discountPercent,
                 (int) $template['id'],
@@ -405,9 +432,12 @@ final class RecurringInvoiceGenerator
             // a kódy byly NULL).
             $items = [];
             foreach ($template['items'] as $item) {
-                $description = $syncTarget !== null
-                    ? MonthSynchronizer::syncTo((string) $item['description'], $syncTarget)
-                    : (string) $item['description'];
+                // Pořadí: 1) placeholdery, 2) M/YYYY sync. Obojí míří na stejné ref.
+                // datum, takže sync je vůči výstupu placeholderů idempotentní.
+                $description = DescriptionPlaceholders::apply((string) $item['description'], $placeholderRef, $lang);
+                if ($syncTarget !== null) {
+                    $description = MonthSynchronizer::syncTo($description, $syncTarget);
+                }
                 $items[] = [
                     'description'            => $description,
                     'quantity'               => (float) $item['quantity'],
@@ -425,6 +455,47 @@ final class RecurringInvoiceGenerator
             $pdo->rollBack();
             throw $e;
         }
+    }
+
+    /**
+     * Neplátce DPH fakturuje bez DPH → všechny položky se přepnou na 0% osvobozenou sazbu
+     * (rate_percent=0, !is_reverse_charge) platnou k datu plnění. Zrcadlí chování ruční
+     * faktury (InvoiceEditor.defaultVatRateId), kde frontend vybere 0% sazbu; tady to dělá
+     * autoritativně backend, takže to ochrání i šablony uložené dřív s nominální sazbou.
+     * Plátce (nebo nenalezený supplier) zůstává beze změny.
+     *
+     * @param list<array<string, mixed>> $items
+     * @return list<array<string, mixed>>
+     */
+    private function coerceNonVatPayerRates(\PDO $pdo, int $supplierId, array $items, string $referenceDate): array
+    {
+        $stmt = $pdo->prepare('SELECT is_vat_payer FROM supplier WHERE id = ?');
+        $stmt->execute([$supplierId]);
+        $isVatPayer = $stmt->fetchColumn();
+        // false = supplier nenalezen → nech beze změny; 1 = plátce → nic neřeš.
+        if ($isVatPayer === false || (int) $isVatPayer === 1) {
+            return $items;
+        }
+
+        $rate = $pdo->prepare(
+            'SELECT id FROM vat_rates
+              WHERE rate_percent = 0 AND is_reverse_charge = 0
+                AND valid_from <= ? AND (valid_to IS NULL OR valid_to >= ?)
+              ORDER BY valid_from DESC LIMIT 1'
+        );
+        $rate->execute([$referenceDate, $referenceDate]);
+        $zeroId = $rate->fetchColumn();
+        if ($zeroId === false) {
+            // Žádná platná 0% sazba k datu — nech sazby být, guard případně chybu nahlásí.
+            return $items;
+        }
+
+        foreach ($items as &$item) {
+            $item['vat_rate_id'] = (int) $zeroId;
+        }
+        unset($item);
+
+        return $items;
     }
 
     /**

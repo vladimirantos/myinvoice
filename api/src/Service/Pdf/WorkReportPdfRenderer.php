@@ -9,6 +9,7 @@ use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\WorkReportRepository;
+use MyInvoice\Service\Signing\Pdf\PdfSigningService;
 use Twig\Environment;
 use Twig\Loader\FilesystemLoader;
 
@@ -21,17 +22,20 @@ use Twig\Loader\FilesystemLoader;
  */
 final class WorkReportPdfRenderer
 {
+    use SignsPdf;
+
     public function __construct(
         private readonly InvoiceRepository $invoices,
         private readonly WorkReportRepository $workReports,
         private readonly Connection $db,
+        private readonly PdfSigningService $pdfSigning,
     ) {}
 
     /**
      * Vyrendrované PDF výkazu do souboru a vrátí cestu.
      * Throw RuntimeException pokud faktura/výkaz neexistuje.
      */
-    public function render(int $invoiceId): string
+    public function render(int $invoiceId, ?int $userId = null): string
     {
         $invoice = $this->invoices->find($invoiceId);
         if ($invoice === null) {
@@ -83,8 +87,8 @@ final class WorkReportPdfRenderer
             'margin_left'   => 15,
             'margin_right'  => 15,
             'tempDir'       => $tmpDir,
-            'default_font'  => 'dejavusans',
             'autoPageBreak' => true,
+            ...MpdfFontConfig::options(),
         ]);
         $mpdf->SetTitle('');
         $mpdf->SetAuthor('');
@@ -107,6 +111,13 @@ final class WorkReportPdfRenderer
 
         $tmpPath = $path . '.new';
         $mpdf->Output($tmpPath, \Mpdf\Output\Destination::FILE);
+
+        // Podpis PDF (PAdES) — má-li dodavatel zapnuto; měkký fallback při chybě.
+        $tmpPath = $this->signPdfIfEnabled(
+            $tmpPath, $this->resolveSupplier($invoice), $this->pdfSigning,
+            'work_report', (int) $invoice['id'], $userId,
+        );
+
         if (is_file($path)) @unlink($path);
         if (!@rename($tmpPath, $path)) {
             $path = $tmpPath;

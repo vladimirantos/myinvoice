@@ -16,9 +16,6 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}   # = radekhulan/myinvoice
-  # Force JavaScript actions (checkout, setup-node, docker/*, …) na Node 24.
-  # Default je Node 20 (deprecated, removal září 2026).
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 # Strategie multi-arch buildu:
 #   1) `build` job běží matrixově per platforma na native runneru (amd64 = ubuntu-latest,
@@ -26,6 +23,10 @@ env:
 #      pushne single-arch image jen pomocí digestu (--push-by-digest, bez tagů).
 #   2) `merge` job stáhne digesty obou platforem a vytvoří manifest list se všemi
 #      semver tagy (1.3.0, 1.3, latest). Bez QEMU = ~5-8 min total místo 28 min.
+#
+# Image se staví z `Dockerfile.alpine` (php:8.5-fpm-alpine + nginx) — ~136 MB, méně RAM.
+# `Dockerfile` (Debian/Apache) zůstává v repu jako lokální fallback, CI ho NEpublikuje.
+# Rollback na Debian: pinni starší version tag (≤ v4.31.0) nebo build z `Dockerfile` lokálně.
 jobs:
   build:
     strategy:
@@ -48,13 +49,13 @@ jobs:
         run: echo "PLATFORM_PAIR=${{ matrix.platform }}" | sed 's|/|-|' >> "$GITHUB_ENV"
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -62,28 +63,31 @@ jobs:
 
       - name: Extract metadata (labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: |
             org.opencontainers.image.title=MyInvoice.cz
-            org.opencontainers.image.description=Czech invoicing system (PHP 8.5 + Vue 3 + MariaDB), multi-supplier
+            org.opencontainers.image.description=Czech invoicing system (PHP 8.5 + Vue 3 + MariaDB), multi-supplier — alpine/nginx
             org.opencontainers.image.vendor=MyWebdesign.cz s.r.o.
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.alpine
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           # GHA cache — per-platform scope, aby se amd64/arm64 navzájem nepřepisovaly.
+          # ignore-error=true: flaky GHA cache backend (občas „error writing layer blob:
+          # not_found" při exportu) nesmí shodit build — image se stejně pushne, jen se
+          # neuloží cache. Bez toho spadl arm64 leg u v4.32.0 a merge se přeskočil.
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to:   type=gha,scope=${{ env.PLATFORM_PAIR }},mode=min
+          cache-to:   type=gha,scope=${{ env.PLATFORM_PAIR }},mode=min,ignore-error=true
 
       - name: Export digest
         run: |
@@ -92,7 +96,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -109,17 +113,17 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -130,7 +134,7 @@ jobs:
       # - workflow_dispatch → image tag: <input>
       - name: Extract metadata (tags)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -161,7 +165,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -172,10 +176,10 @@ jobs:
           tools: composer:v2
 
       - name: Set up Node + pnpm
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: latest
 
@@ -242,7 +246,7 @@ jobs:
           echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: Upload bundle to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ env.BUNDLE }}

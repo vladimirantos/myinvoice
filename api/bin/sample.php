@@ -13,6 +13,7 @@ declare(strict_types=1);
  *   - 8 zakázek (1-3 na klienta)
  *   - 20 vystavených faktur za poslední 2 měsíce
  *   - 4 dobropisy (k 4 z těch 20 faktur)
+ *   - kniha jízd: 1 firemní auto, 15 jízd, 6 tankování
  *
  * Vyžaduje již proběhlý `setup.php` (admin user + supplier v DB).
  *
@@ -56,7 +57,8 @@ echo "  MyInvoice.cz — SAMPLE TEST DATA\n";
 echo "================================================\n";
 echo "  Supplier:   #$supplierId\n";
 echo "  Admin:      #$adminId\n";
-echo "  Vygeneruje: 5 klientů, 8 zakázek, 20 faktur, 4 dobropisy\n";
+echo "  Vygeneruje: 5 klientů, 8 zakázek, 20 faktur, 4 dobropisy, 2 pravidelné fakturace,\n";
+echo "              kniha jízd (1 auto, 15 jízd, 6 tankování)\n";
 echo "  Období:     poslední 2 měsíce\n";
 echo "================================================\n\n";
 
@@ -74,5 +76,6 @@ try {
 }
 
 echo "================================================\n";
-printf("  HOTOVO. %d klientů, %d zakázek, %d faktur, %d dobropisů.\n", $r['clients'], $r['projects'], $r['invoices'], $r['credit_notes']);
+printf("  HOTOVO. %d klientů, %d zakázek, %d faktur, %d dobropisů, %d pravidelných fakturací.\n", $r['clients'], $r['projects'], $r['invoices'], $r['credit_notes'], $r['recurring']);
+printf("          Kniha jízd: %d auto, %d jízd, %d tankování.\n", $r['cars'], $r['trips'], $r['fuelings']);
 echo "================================================\n";

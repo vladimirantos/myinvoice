@@ -7,6 +7,7 @@ namespace MyInvoice\Action\Client;
 use MyInvoice\Http\Json;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Repository\ClientEmailContactRepository;
 use MyInvoice\Repository\ClientRepository;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -16,6 +17,7 @@ final class GetClientAction
     public function __construct(
         private readonly ClientRepository $repo,
         private readonly Connection $db,
+        private readonly ClientEmailContactRepository $emailContacts,
     ) {}
 
     public function __invoke(Request $request, Response $response, array $args): Response
@@ -27,6 +29,7 @@ final class GetClientAction
             return Json::error($response, 'not_found', 'Klient nenalezen.', 404);
         }
         $client['projects'] = $this->repo->projectsForClient($id);
+        $client['email_contacts'] = $this->emailContacts->listForClient($id, $sid);
         $pdo = $this->db->pdo();
         $stmt = $pdo->prepare('SELECT COUNT(*) FROM invoices WHERE client_id = ?');
         $stmt->execute([$id]);
@@ -59,7 +62,7 @@ final class GetClientAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.client_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
                 AND COALESCE(i.tax_date, i.issue_date) >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)
               GROUP BY month, cur.code
               ORDER BY month"
@@ -84,7 +87,7 @@ final class GetClientAction
                JOIN currencies cur ON cur.id = i.currency_id
               WHERE i.client_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
               GROUP BY year, cur.code
               ORDER BY year DESC"
         );
@@ -111,7 +114,7 @@ final class GetClientAction
           LEFT JOIN projects p ON p.id = i.project_id
               WHERE i.client_id = ?
                 AND i.status IN ('issued', 'sent', 'reminded', 'paid')
-                AND i.invoice_type IN ('invoice', 'credit_note')
+                AND i.invoice_type IN ('invoice', 'credit_note', 'tax_document')
               GROUP BY i.project_id, p.name, cur.code
               ORDER BY total DESC"
         );
@@ -132,12 +135,12 @@ final class GetClientAction
         // _czk fieldy: stejný přepočet jako revenue_by_*, pro UI agregaci v multi-ccy scénáři.
         $stmtU = $pdo->prepare(
             "SELECT cur.code AS currency,
-                    SUM(i.amount_to_pay) AS unpaid_total,
-                    SUM(i.amount_to_pay * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS unpaid_total_czk,
+                    SUM(i.amount_to_pay - i.paid_total) AS unpaid_total,
+                    SUM((i.amount_to_pay - i.paid_total) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)) AS unpaid_total_czk,
                     COUNT(*) AS unpaid_count,
-                    SUM(CASE WHEN i.due_date <= CURDATE() THEN i.amount_to_pay ELSE 0 END) AS overdue_total,
+                    SUM(CASE WHEN i.due_date <= CURDATE() THEN i.amount_to_pay - i.paid_total ELSE 0 END) AS overdue_total,
                     SUM(CASE WHEN i.due_date <= CURDATE()
-                             THEN i.amount_to_pay * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)
+                             THEN (i.amount_to_pay - i.paid_total) * COALESCE(IF(cur.code = 'CZK', 1, i.exchange_rate), 1)
                              ELSE 0 END) AS overdue_total_czk,
                     SUM(CASE WHEN i.due_date <= CURDATE() THEN 1 ELSE 0 END) AS overdue_count
                FROM invoices i
@@ -145,6 +148,10 @@ final class GetClientAction
               WHERE i.client_id = ?
                 AND i.status IN ('issued','sent','reminded')
                 AND i.invoice_type IN ('invoice','credit_note')
+                -- Finální doklad k zaplacené proformě má amount_to_pay = 0 by design;
+                -- není pohledávka (dobropisy se záporným totálem ponecháváme).
+                -- Částečné úhrady (#89): dluh = amount_to_pay - paid_total.
+                AND (i.invoice_type NOT IN ('invoice','proforma') OR i.amount_to_pay - i.paid_total > 0)
               GROUP BY cur.code"
         );
         $stmtU->execute([$id]);

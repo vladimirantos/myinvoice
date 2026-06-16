@@ -19,6 +19,40 @@ final class InvoiceRepository
 {
     public function __construct(private readonly Connection $db) {}
 
+    /**
+     * Cache existence sloupce income_tax_exempt (migrace 0087). Instalace nasazená
+     * s kódem ≥ v4.9.3, ale pozadu s migracemi, sloupce nemá → bez této detekce
+     * by každé uložení faktury spadlo na PDOException. S detekcí se faktura uloží
+     * (jen bez příznaku osvobození), dokud migrace 0087 neproběhne.
+     */
+    private ?bool $hasIncomeTaxExempt = null;
+
+    private function supportsIncomeTaxExempt(): bool
+    {
+        if ($this->hasIncomeTaxExempt === null) {
+            $col = $this->db->pdo()->query("SHOW COLUMNS FROM invoices LIKE 'income_tax_exempt'")->fetch();
+            $this->hasIncomeTaxExempt = $col !== false;
+        }
+        return $this->hasIncomeTaxExempt;
+    }
+
+    /**
+     * Cache existence sloupce auto_send_reminders (migrace 0088). Stejná obrana jako
+     * u income_tax_exempt — instalace s kódem, ale pozadu s migrací sloupec nemá;
+     * bez detekce by uložení faktury spadlo. Výchozí chování (upomínky zapnuté) drží
+     * DB default 1, takže vynechání sloupce při INSERT/UPDATE nic nerozbije.
+     */
+    private ?bool $hasAutoSendReminders = null;
+
+    private function supportsAutoSendReminders(): bool
+    {
+        if ($this->hasAutoSendReminders === null) {
+            $col = $this->db->pdo()->query("SHOW COLUMNS FROM invoices LIKE 'auto_send_reminders'")->fetch();
+            $this->hasAutoSendReminders = $col !== false;
+        }
+        return $this->hasAutoSendReminders;
+    }
+
     public function find(int $id): ?array
     {
         $pdo = $this->db->pdo();
@@ -29,6 +63,7 @@ final class InvoiceRepository
                     c.ic AS client_ic, c.dic AS client_dic,
                     c.language AS client_language,
                     c.reverse_charge AS client_reverse_charge,
+                    u.name AS created_by_name,
                     p.name AS project_name, p.hourly_rate AS project_hourly_rate,
                     p.payment_due_days AS project_payment_due_days,
                     p.project_number AS project_number, p.contract_number AS contract_number,
@@ -40,6 +75,7 @@ final class InvoiceRepository
                     rcat.label AS revenue_category_label, rcat.code AS revenue_category_code
                FROM invoices i
                JOIN clients c ON c.id = i.client_id
+          LEFT JOIN users u ON u.id = i.created_by
           LEFT JOIN projects p ON p.id = i.project_id
                JOIN currencies cur ON cur.id = i.currency_id
           LEFT JOIN revenue_categories rcat ON rcat.id = i.revenue_category_id
@@ -130,6 +166,46 @@ final class InvoiceRepository
             ];
         }
 
+        // Existují u tohoto odběratele nespárované zálohy (proforma) k propojení?
+        // Počítáme jen pro daňové doklady bez vazby — jinak nemá nabídka „spárovat" smysl.
+        // UI tlačítko se schová, když je false (stejná podmínka jako advanceCandidates()).
+        $row['has_advance_candidates'] = false;
+        if (($row['invoice_type'] ?? '') === 'invoice' && empty($row['parent_invoice_id'])) {
+            $cand = $pdo->prepare(
+                "SELECT EXISTS (
+                          SELECT 1 FROM invoices i
+                           WHERE i.supplier_id = ? AND i.client_id = ?
+                             AND i.invoice_type = 'proforma' AND i.status != 'cancelled'
+                             AND i.id <> ?
+                             AND NOT EXISTS (SELECT 1 FROM invoices ch
+                                              WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice')
+                             -- Záloha s vystavenými daňovými doklady k platbě (#89) se ručně
+                             -- nepáruje (finál by neměl § 37a odpočty) — linkAdvance ji odmítá.
+                             AND NOT EXISTS (SELECT 1 FROM invoices td
+                                              WHERE td.parent_invoice_id = i.id AND td.invoice_type = 'tax_document'
+                                                AND td.status NOT IN ('draft', 'cancelled'))
+                        )"
+            );
+            $cand->execute([(int) $row['supplier_id'], (int) $row['client_id'], $id]);
+            $row['has_advance_candidates'] = (bool) $cand->fetchColumn();
+        }
+
+        // Opačný směr: u nepropojené proformy — existují nepropojené daňové doklady
+        // téhož odběratele, se kterými ji lze spárovat? (řídí tlačítko v detailu zálohy)
+        $row['has_final_candidates'] = false;
+        if (($row['invoice_type'] ?? '') === 'proforma' && empty($row['final_invoice'])) {
+            $fcand = $pdo->prepare(
+                "SELECT EXISTS (
+                          SELECT 1 FROM invoices i
+                           WHERE i.supplier_id = ? AND i.client_id = ?
+                             AND i.invoice_type = 'invoice' AND i.status != 'cancelled'
+                             AND i.parent_invoice_id IS NULL AND i.id <> ?
+                        )"
+            );
+            $fcand->execute([(int) $row['supplier_id'], (int) $row['client_id'], $id]);
+            $row['has_final_candidates'] = (bool) $fcand->fetchColumn();
+        }
+
         return $row;
     }
 
@@ -144,6 +220,209 @@ final class InvoiceRepository
         $this->db->pdo()->prepare(
             'UPDATE invoices SET exchange_rate = ?, exchange_rate_date = ? WHERE id = ?'
         )->execute([$rate, $rateDate, $invoiceId]);
+    }
+
+    // ── Propojení zálohové faktury (proforma) s vyúčtovacím daňovým dokladem ──
+    // Symetrické s PurchaseInvoiceRepository::linkAdvance — u vydaných je „záloha"
+    // = invoice_type='proforma', vazba se ukládá NA finální fakturu (parent_invoice_id),
+    // shodně s flow „vystavit daňový doklad ze zálohy". Zaplacení (status) se nemění.
+
+    /**
+     * Kandidáti k propojení: nespárované zálohové faktury (invoice_type='proforma')
+     * stejného odběratele a dodavatele jako finální faktura $finalId, které ještě
+     * nejsou navázané na žádný daňový doklad. Řazení: stejná měna → nejbližší hrubá
+     * částka → nejnovější.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function advanceCandidates(int $finalId, int $supplierId): array
+    {
+        $final = $this->find($finalId);
+        if ($final === null || (int) ($final['supplier_id'] ?? 0) !== $supplierId) {
+            return [];
+        }
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT i.id, i.varsymbol, i.invoice_type, i.status, i.issue_date,
+                    i.total_with_vat, cur.code AS currency
+               FROM invoices i
+               JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND i.client_id = ?
+                AND i.invoice_type = 'proforma'
+                AND i.status != 'cancelled'
+                AND i.id <> ?
+                AND NOT EXISTS (SELECT 1 FROM invoices ch
+                                 WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice')
+                -- Záloha s vystavenými daňovými doklady k platbě (#89) — viz has_advance_candidates.
+                AND NOT EXISTS (SELECT 1 FROM invoices td
+                                 WHERE td.parent_invoice_id = i.id AND td.invoice_type = 'tax_document'
+                                   AND td.status NOT IN ('draft', 'cancelled'))
+              ORDER BY (i.currency_id = ?) DESC,
+                       ABS(i.total_with_vat - ?) ASC,
+                       i.issue_date DESC, i.id DESC
+              LIMIT 50"
+        );
+        $stmt->execute([
+            $supplierId, (int) $final['client_id'], $finalId,
+            (int) $final['currency_id'], (float) $final['total_with_vat'],
+        ]);
+        return array_map(fn (array $r) => [
+            'id'             => (int) $r['id'],
+            'varsymbol'      => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'invoice_type'   => (string) $r['invoice_type'],
+            'status'         => (string) $r['status'],
+            'issue_date'     => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat' => (float) $r['total_with_vat'],
+            'currency'       => (string) $r['currency'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
+    }
+
+    /**
+     * Propojí daňový doklad ($finalId) se zálohovou fakturou ($advanceId) — uloží
+     * parent_invoice_id na finální fakturu. Pokud finální nemá vyplněnou zálohu
+     * (advance_paid_amount = 0), doplní ji = total_with_vat proformy, aby amount_to_pay
+     * ukázal zbývající úhradu (amount_to_pay je generated column). Status NEMĚNÍ.
+     *
+     * Validace: oba doklady patří dodavateli, oba mají stejného odběratele,
+     * $advanceId je proforma, $finalId je běžný daňový doklad (invoice) bez rodiče.
+     *
+     * @throws \RuntimeException při porušení validace
+     */
+    public function linkAdvance(int $finalId, int $advanceId, int $supplierId): void
+    {
+        if ($finalId === $advanceId) {
+            throw new \RuntimeException('Nelze propojit doklad sám se sebou.');
+        }
+        $final   = $this->find($finalId);
+        $advance = $this->find($advanceId);
+        if ($final === null || $advance === null
+            || (int) ($final['supplier_id'] ?? 0) !== $supplierId
+            || (int) ($advance['supplier_id'] ?? 0) !== $supplierId) {
+            throw new \RuntimeException('Doklad nenalezen.');
+        }
+        if (($advance['invoice_type'] ?? '') !== 'proforma') {
+            throw new \RuntimeException('Propojit lze jen se zálohovou fakturou (proforma).');
+        }
+        if (($final['invoice_type'] ?? '') !== 'invoice') {
+            throw new \RuntimeException('Zálohu lze vyúčtovat jen běžným daňovým dokladem.');
+        }
+        if (!empty($final['parent_invoice_id'])) {
+            throw new \RuntimeException('Faktura už je propojena s jiným dokladem.');
+        }
+        if ((int) $final['client_id'] !== (int) $advance['client_id']) {
+            throw new \RuntimeException('Záloha i finální faktura musí mít stejného odběratele.');
+        }
+
+        // Záloha s vystavenými daňovými doklady k přijaté platbě (#89) se ručně
+        // párovat nedá — finál by musel nést § 37a záporné odpočtové řádky (snižují
+        // základ i daň), které ruční link nepřidává → už zdaněná úplata by se na
+        // finálu zdanila podruhé. Správná cesta: „Vystavit daňový doklad" přímo
+        // z proformy (FinalFromProformaCreator řádky vygeneruje).
+        $tdStmt = $this->db->pdo()->prepare(
+            "SELECT COUNT(*) FROM invoices
+              WHERE parent_invoice_id = ? AND invoice_type = 'tax_document'
+                AND status NOT IN ('draft', 'cancelled')"
+        );
+        $tdStmt->execute([$advanceId]);
+        if ((int) $tdStmt->fetchColumn() > 0) {
+            throw new \RuntimeException(
+                'K záloze existují daňové doklady k přijaté platbě — finál vystav tlačítkem „Vystavit daňový doklad" '
+                . 'z detailu zálohy (doplní odpočtové řádky), ruční propojení by daň zdvojilo.'
+            );
+        }
+
+        // Výše odpočtu zálohy (#89): primárně SKUTEČNĚ přijaté platby proformy
+        // (paid_total); legacy fallback pro proformy bez evidence plateb
+        // (paid_total = 0, status paid z dob před #89) → celý total.
+        // advance_paid_amount nesmí překročit částku dokladu — jinak by amount_to_pay
+        // (generated = total_with_vat − advance_paid_amount) spadl do mínusu. Když je
+        // záloha větší než faktura, odečteme jen do výše faktury (zbytek = 0 k úhradě).
+        $finalTotal   = (float) $final['total_with_vat'];
+        $paidTotal    = (float) ($advance['paid_total'] ?? 0);
+        $advanceBase  = $paidTotal > 0 ? $paidTotal : (float) $advance['total_with_vat'];
+        $advanceTotal   = min($advanceBase, $finalTotal);
+        $setAdvancePaid = ((float) ($final['advance_paid_amount'] ?? 0)) == 0.0;
+
+        $sql = 'UPDATE invoices SET parent_invoice_id = ?'
+             . ($setAdvancePaid ? ', advance_paid_amount = ?' : '')
+             . ' WHERE id = ? AND supplier_id = ? AND parent_invoice_id IS NULL';
+        $params = $setAdvancePaid
+            ? [$advanceId, $advanceTotal, $finalId, $supplierId]
+            : [$advanceId, $finalId, $supplierId];
+        $this->db->pdo()->prepare($sql)->execute($params);
+    }
+
+    /**
+     * Zruší propojení daňového dokladu se zálohovou fakturou (parent_invoice_id = NULL).
+     * advance_paid_amount ponecháme (ruční korekce). Odpojí jen vazbu na proformu —
+     * původní fakturu storna/dobropisu (non-proforma parent) se nedotkne.
+     *
+     * Jen pro invoice_type='invoice' (ručně párovatelný finál) — vazba daňového
+     * dokladu k přijaté platbě (#89) je strukturální (drží § 37a odpočty finálu
+     * i vazbu na platbu) a rozpojit nejde.
+     */
+    public function unlinkAdvance(int $finalId, int $supplierId): void
+    {
+        $type = $this->db->pdo()->prepare('SELECT invoice_type FROM invoices WHERE id = ? AND supplier_id = ?');
+        $type->execute([$finalId, $supplierId]);
+        if ($type->fetchColumn() === 'tax_document') {
+            throw new \RuntimeException(
+                'Daňový doklad k přijaté platbě je vázaný na platbu zálohové faktury — propojení nelze zrušit. '
+                . 'Pokud doklad nemá existovat, smaž koncept nebo ho stornuj.'
+            );
+        }
+        $this->db->pdo()->prepare(
+            "UPDATE invoices f
+                JOIN invoices p ON p.id = f.parent_invoice_id
+                SET f.parent_invoice_id = NULL
+              WHERE f.id = ? AND f.supplier_id = ? AND f.invoice_type = 'invoice'
+                AND p.invoice_type = 'proforma'"
+        )->execute([$finalId, $supplierId]);
+    }
+
+    /**
+     * Opačný směr párování — z detailu zálohové faktury ($proformaId) nabídneme
+     * nepropojené daňové doklady (invoice_type='invoice', bez parent_invoice_id)
+     * stejného odběratele a dodavatele. Vlastní propojení pak proběhne přes
+     * linkAdvance($finalId, $proformaId). Řazení: stejná měna → nejbližší částka → nejnovější.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function finalCandidates(int $proformaId, int $supplierId): array
+    {
+        $proforma = $this->find($proformaId);
+        if ($proforma === null || (int) ($proforma['supplier_id'] ?? 0) !== $supplierId) {
+            return [];
+        }
+        $stmt = $this->db->pdo()->prepare(
+            "SELECT i.id, i.varsymbol, i.invoice_type, i.status, i.issue_date,
+                    i.total_with_vat, cur.code AS currency
+               FROM invoices i
+               JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.supplier_id = ?
+                AND i.client_id = ?
+                AND i.invoice_type = 'invoice'
+                AND i.status != 'cancelled'
+                AND i.parent_invoice_id IS NULL
+                AND i.id <> ?
+              ORDER BY (i.currency_id = ?) DESC,
+                       ABS(i.total_with_vat - ?) ASC,
+                       i.issue_date DESC, i.id DESC
+              LIMIT 50"
+        );
+        $stmt->execute([
+            $supplierId, (int) $proforma['client_id'], $proformaId,
+            (int) $proforma['currency_id'], (float) $proforma['total_with_vat'],
+        ]);
+        return array_map(fn (array $r) => [
+            'id'             => (int) $r['id'],
+            'varsymbol'      => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+            'invoice_type'   => (string) $r['invoice_type'],
+            'status'         => (string) $r['status'],
+            'issue_date'     => $r['issue_date'] !== null ? (string) $r['issue_date'] : null,
+            'total_with_vat' => (float) $r['total_with_vat'],
+            'currency'       => (string) $r['currency'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC) ?: []);
     }
 
     public function itemsFor(int $invoiceId): array
@@ -262,10 +541,28 @@ final class InvoiceRepository
         }
         if (!empty($filters['unpaid_only'])) {
             $where[] = "i.status IN ('issued','sent','reminded')";
-            $where[] = 'i.invoice_type IN ("invoice","credit_note")';
+            // Pohledávky = vše kromě proforem + NEZAPLACENÉ NESPÁROVANÉ proformy
+            // (zálohovky bez dceřiného ostrého dokladu) — ty jsou reálný dluh.
+            // Dřív filtr proformy zcela vynechával (IN invoice,credit_note), takže
+            // nezaplacené zálohové faktury se v "nezaplacené" vůbec neukázaly.
+            // Spárovaná proforma se vynechá, dluh nese ostrý doklad. Zrcadlí dashboard
+            // (receivableDocTypeSql) a InvoiceAmountPolicy.
+            $where[] = "(i.invoice_type != 'proforma'"
+                . " OR NOT EXISTS (SELECT 1 FROM invoices ch"
+                . " WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice'))";
+            // Finální daňový doklad k zaplacené proformě má amount_to_pay = 0 by design
+            // (záloha pokryla celek) — není nezaplacený, jen status zůstal 'issued'.
+            // Dobropisy (záporný total) ponecháváme. Částečné úhrady (#89): dlužná
+            // částka = amount_to_pay - paid_total.
+            $where[] = "(i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)";
         }
         if (!empty($filters['overdue'])) {
             $where[] = "i.status IN ('issued','sent','reminded') AND i.due_date <= CURDATE()";
+            // Stejná pohledávková sémantika jako unpaid (vč. nespárovaných proforem).
+            $where[] = "(i.invoice_type != 'proforma'"
+                . " OR NOT EXISTS (SELECT 1 FROM invoices ch"
+                . " WHERE ch.parent_invoice_id = i.id AND ch.invoice_type = 'invoice'))";
+            $where[] = "(i.invoice_type NOT IN ('invoice','proforma','tax_document') OR i.amount_to_pay - i.paid_total > 0)";
         }
         if (!empty($filters['q'])) {
             // Escape % a _ wildcards aby uživatelský input nedělal slow-query DoS / nečekanou shodu
@@ -295,7 +592,7 @@ final class InvoiceRepository
                        i.issue_date, i.tax_date, i.due_date,
                        i.currency_id, cur.code AS currency, cur.symbol AS currency_symbol, cur.decimals AS currency_decimals,
                        i.total_without_vat, i.total_vat, i.total_with_vat,
-                       i.advance_paid_amount, i.amount_to_pay,
+                       i.advance_paid_amount, i.amount_to_pay, i.paid_total,
                        i.status, i.payment_method, i.revenue_category_id,
                        i.sent_at, i.last_reminder_at, i.reminder_count,
                        i.paid_at, i.cancelled_at,
@@ -348,28 +645,43 @@ final class InvoiceRepository
             $cur = $row['currency'];
             if (!isset($grouped[$month]['totals_per_currency'][$cur])) {
                 $grouped[$month]['totals_per_currency'][$cur] = [
-                    'currency'    => $cur,
-                    'without_vat' => 0.0,
-                    'vat'         => 0.0,
-                    'with_vat'    => 0.0,
+                    'currency'        => $cur,
+                    'without_vat'     => 0.0,
+                    'vat'             => 0.0,
+                    'with_vat'        => 0.0,
+                    // Predikce: koncepty (draft) vystavených faktur/dobropisů – ještě nejsou
+                    // obratem, ale ukazují, kolik je „rozpracováno" k vystavení v daném měsíci.
+                    'draft_without_vat' => 0.0,
+                    'draft_vat'         => 0.0,
+                    'draft_with_vat'    => 0.0,
                 ];
             }
-            // Do obratu počítáme jen vystavené faktury + dobropisy (credit_note má záporné částky → odečte se).
+            // Do obratu počítáme jen vystavené faktury + dobropisy (credit_note má záporné částky → odečte se)
+            // + daňové doklady k přijaté platbě (finál k záloze pak nese jen zbytek přes odpočtové řádky).
             // Vyloučeno: draft (koncepty), proforma (zálohovky), cancelled (storno), cancellation (interní storno).
             if (in_array($row['status'], ['issued', 'sent', 'reminded', 'paid'], true)
-                && in_array($row['invoice_type'], ['invoice', 'credit_note'], true)) {
+                && in_array($row['invoice_type'], ['invoice', 'credit_note', 'tax_document'], true)) {
                 $grouped[$month]['totals_per_currency'][$cur]['without_vat'] += $row['total_without_vat'];
                 $grouped[$month]['totals_per_currency'][$cur]['vat']         += $row['total_vat'];
                 $grouped[$month]['totals_per_currency'][$cur]['with_vat']    += $row['total_with_vat'];
+            } elseif ($row['status'] === 'draft'
+                && in_array($row['invoice_type'], ['invoice', 'credit_note', 'tax_document'], true)) {
+                // Koncepty do samostatné „predikce" (sčítají se k obratu až na FE pro predikovaný součet).
+                $grouped[$month]['totals_per_currency'][$cur]['draft_without_vat'] += $row['total_without_vat'];
+                $grouped[$month]['totals_per_currency'][$cur]['draft_vat']         += $row['total_vat'];
+                $grouped[$month]['totals_per_currency'][$cur]['draft_with_vat']    += $row['total_with_vat'];
             }
         }
 
         // Round totals
         foreach ($grouped as &$m) {
             foreach ($m['totals_per_currency'] as &$t) {
-                $t['without_vat'] = round($t['without_vat'], 2);
-                $t['vat']         = round($t['vat'], 2);
-                $t['with_vat']    = round($t['with_vat'], 2);
+                $t['without_vat']       = round($t['without_vat'], 2);
+                $t['vat']               = round($t['vat'], 2);
+                $t['with_vat']          = round($t['with_vat'], 2);
+                $t['draft_without_vat'] = round($t['draft_without_vat'], 2);
+                $t['draft_vat']         = round($t['draft_vat'], 2);
+                $t['draft_with_vat']    = round($t['draft_with_vat'], 2);
             }
             $m['totals_per_currency'] = array_values($m['totals_per_currency']);
         }
@@ -423,15 +735,22 @@ final class InvoiceRepository
             $paymentMethod = 'bank_transfer';
         }
 
+        $hasExempt = $this->supportsIncomeTaxExempt();
+        $hasReminders = $this->supportsAutoSendReminders();
         $sql = 'INSERT INTO invoices
             (invoice_type, parent_invoice_id, client_id, project_id, supplier_id,
-             issue_date, tax_date, due_date, currency_id, reverse_charge, language,
+             issue_date, tax_date, due_date, currency_id, reverse_charge, prices_include_vat, language,
              note_above_items, note_below_items, advance_paid_amount, discount_percent, varsymbol,
-             payment_method, status, vat_classification_code, revenue_category, revenue_category_id, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?, ?)';
+             payment_method, status, vat_classification_code, revenue_category, revenue_category_id,'
+            . ($hasExempt ? ' income_tax_exempt, income_tax_exempt_reason,' : '')
+            . ($hasReminders ? ' auto_send_reminders,' : '')
+            . ' created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "draft", ?, ?, ?,'
+            . ($hasExempt ? ' ?, ?,' : '')
+            . ($hasReminders ? ' ?,' : '')
+            . ' ?)';
 
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([
+        $params = [
             (string) ($data['invoice_type'] ?? 'invoice'),
             isset($data['parent_invoice_id']) ? (int) $data['parent_invoice_id'] : null,
             $clientId,
@@ -442,6 +761,7 @@ final class InvoiceRepository
             (string) $data['due_date'],
             (int) $data['currency_id'],
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             (string) ($data['language'] ?? 'cs'),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
@@ -452,12 +772,26 @@ final class InvoiceRepository
             !empty($data['vat_classification_code']) ? (string) $data['vat_classification_code'] : null,
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             $revenueCategoryId,
-            $userId,
-        ]);
+        ];
+        if ($hasExempt) {
+            $params[] = !empty($data['income_tax_exempt']) ? 1 : 0;
+            $params[] = self::normalizeExemptReason($data['income_tax_exempt_reason'] ?? null);
+        }
+        if ($hasReminders) {
+            $params[] = array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1;
+        }
+        $params[] = $userId;
+
+        $pdo->prepare($sql)->execute($params);
 
         return (int) $pdo->lastInsertId();
     }
 
+    /**
+     * POZN.: seznam editovatelných sloupců drž v sync s UpdateInvoiceAction::diffFields()
+     * (audit „co se změnilo" v historii faktury). Přidáš-li sem user-facing sloupec,
+     * přidej ho i tam, jinak ho audit detail tiše neuvede.
+     */
     public function updateDraft(int $id, array $data): void
     {
         // Varsymbol — měníme jen pokud je v payloadu klíč 'varsymbol' (allow null = vyčištění,
@@ -487,13 +821,18 @@ final class InvoiceRepository
         $hasType = array_key_exists('invoice_type', $data)
             && in_array((string) $data['invoice_type'], ['invoice', 'proforma', 'credit_note'], true);
 
+        $hasExempt = $this->supportsIncomeTaxExempt();
+        $hasReminders = $this->supportsAutoSendReminders();
+
         $sql = 'UPDATE invoices SET
                 client_id = ?, project_id = ?,
                 issue_date = ?, tax_date = ?, due_date = ?,
-                currency_id = ?, reverse_charge = ?, language = ?,
+                currency_id = ?, reverse_charge = ?, prices_include_vat = ?, language = ?,
                 note_above_items = ?, note_below_items = ?,
                 advance_paid_amount = ?, discount_percent = ?,
                 vat_classification_code = ?, revenue_category = ?, revenue_category_id = ?'
+              . ($hasExempt ? ', income_tax_exempt = ?, income_tax_exempt_reason = ?' : '')
+              . ($hasReminders ? ', auto_send_reminders = ?' : '')
               . ($hasVarsymbol ? ', varsymbol = ?' : '')
               . ($hasPaymentMethod ? ', payment_method = ?' : '')
               . ($hasType ? ', invoice_type = ?' : '')
@@ -507,6 +846,7 @@ final class InvoiceRepository
             (string) $data['due_date'],
             (int) $data['currency_id'],
             !empty($data['reverse_charge']) ? 1 : 0,
+            !empty($data['prices_include_vat']) ? 1 : 0,
             (string) ($data['language'] ?? 'cs'),
             $data['note_above_items'] ?? null,
             $data['note_below_items'] ?? null,
@@ -516,6 +856,13 @@ final class InvoiceRepository
             !empty($data['revenue_category']) ? (string) $data['revenue_category'] : null,
             isset($data['revenue_category_id']) && $data['revenue_category_id'] ? (int) $data['revenue_category_id'] : null,
         ];
+        if ($hasExempt) {
+            $params[] = !empty($data['income_tax_exempt']) ? 1 : 0;
+            $params[] = self::normalizeExemptReason($data['income_tax_exempt_reason'] ?? null);
+        }
+        if ($hasReminders) {
+            $params[] = array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1;
+        }
         if ($hasVarsymbol) $params[] = $manualVarsymbol;
         if ($hasPaymentMethod) $params[] = $paymentMethod;
         if ($hasType) $params[] = (string) $data['invoice_type'];
@@ -680,6 +1027,19 @@ final class InvoiceRepository
     }
 
     /**
+     * Důvod osvobození od daně z příjmů — trim, prázdné → null, max 190 znaků
+     * (DB sloupec income_tax_exempt_reason VARCHAR(190)).
+     */
+    private static function normalizeExemptReason(mixed $value): ?string
+    {
+        $s = trim((string) ($value ?? ''));
+        if ($s === '') {
+            return null;
+        }
+        return mb_substr($s, 0, 190);
+    }
+
+    /**
      * Default vat_classification_code podle sazby + RC + země klienta pro VYSTAVENÉ faktury.
      *
      * Mapování:
@@ -767,8 +1127,19 @@ final class InvoiceRepository
         if (isset($row['currency_id']))   $row['currency_id'] = (int) $row['currency_id'];
         if (isset($row['supplier_id']))   $row['supplier_id'] = (int) $row['supplier_id'];
         $row['reverse_charge']      = isset($row['reverse_charge']) ? (bool) $row['reverse_charge'] : false;
-        foreach (['total_without_vat', 'total_vat', 'total_with_vat', 'rounding', 'advance_paid_amount', 'amount_to_pay', 'discount_percent'] as $f) {
+        $row['prices_include_vat']  = isset($row['prices_include_vat']) ? (bool) $row['prices_include_vat'] : false;
+        if (array_key_exists('income_tax_exempt', $row)) {
+            $row['income_tax_exempt'] = (bool) $row['income_tax_exempt'];
+        }
+        if (array_key_exists('auto_send_reminders', $row)) {
+            $row['auto_send_reminders'] = (bool) $row['auto_send_reminders'];
+        }
+        foreach (['total_without_vat', 'total_vat', 'total_with_vat', 'rounding', 'advance_paid_amount', 'amount_to_pay', 'paid_total', 'discount_percent'] as $f) {
             if (array_key_exists($f, $row) && $row[$f] !== null) $row[$f] = (float) $row[$f];
+        }
+        // Odvozený platební stav (#89) — unpaid/partially_paid/paid/overpaid; NULL pro draft/cancelled.
+        if (array_key_exists('paid_total', $row) && array_key_exists('amount_to_pay', $row) && array_key_exists('status', $row)) {
+            $row['payment_status'] = \MyInvoice\Service\Invoice\InvoicePaymentService::paymentStatus($row);
         }
         if (array_key_exists('exchange_rate', $row)) {
             $row['exchange_rate'] = $row['exchange_rate'] !== null ? (float) $row['exchange_rate'] : null;
@@ -860,6 +1231,35 @@ final class InvoiceRepository
                     approval_rejection_reason = ?
               WHERE id = ?'
         )->execute([$newStatus, $decidedBy, $rejectionReason, $invoiceId]);
+    }
+
+    /**
+     * Atomické rozhodnutí pro VEŘEJNÝ schvalovací tok (bez auth). Na rozdíl od
+     * `setApprovalDecision` je UPDATE podmíněný `approval_token = ? AND
+     * approval_status = 'requested'`, takže dva souběžné `decide` se stejným
+     * tokenem serializuje DB — vyhraje právě jeden (rowCount === 1), druhý dostane
+     * rowCount 0 a NESMÍ pokračovat (jinak by se faktura vystavila/poslala 2×).
+     *
+     * @return bool true pokud tento request rozhodnutí skutečně zapsal (vyhrál závod)
+     */
+    public function decideIfRequested(int $invoiceId, string $token, string $newStatus, ?string $decidedBy, ?string $rejectionReason): bool
+    {
+        if (!in_array($newStatus, ['approved', 'rejected'], true)) {
+            throw new \InvalidArgumentException("Invalid approval status: $newStatus");
+        }
+        $stmt = $this->db->pdo()->prepare(
+            "UPDATE invoices
+                SET approval_status = ?,
+                    approval_token = NULL,
+                    approval_decided_at = NOW(),
+                    approval_decided_by_email = ?,
+                    approval_rejection_reason = ?
+              WHERE id = ?
+                AND approval_token = ?
+                AND approval_status = 'requested'"
+        );
+        $stmt->execute([$newStatus, $decidedBy, $rejectionReason, $invoiceId, $token]);
+        return $stmt->rowCount() === 1;
     }
 
     /**

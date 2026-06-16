@@ -46,11 +46,14 @@ final class DphBookPdfRenderer
             'margin_right'  => 8,
             'margin_top'    => 12,
             'margin_bottom' => 12,
-            'default_font'  => 'dejavusans',
             'tempDir'       => $tmpDir,
             'autoPageBreak' => true,
+            ...MpdfFontConfig::options(),
         ]);
-        $period = $data['period']['year'] . '-' . str_pad((string) $data['period']['month'], 2, '0', \STR_PAD_LEFT);
+        $quarter = $data['period']['quarter'] ?? null;
+        $period = $quarter !== null
+            ? $data['period']['year'] . '-Q' . $quarter
+            : $data['period']['year'] . '-' . str_pad((string) $data['period']['month'], 2, '0', \STR_PAD_LEFT);
         $mpdf->SetTitle('Kniha DPH ' . $period);
         $mpdf->SetCreator('MyInvoice.cz');
 

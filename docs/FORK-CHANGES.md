@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.6.0** (merge commit `72ef26d`, 2026-05-29).
+Base: poslední mergnutá upstream verze = **v4.33.0** (merge 2026-06-16; předtím v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -62,20 +62,27 @@ ale upstream pro něj zatím nemá UI/endpoint). Razítko se renderuje vpravo do
 postaví. Pozor: naše `SupplierLogoConverter` má navíc `$subdir` — pokud naše mažeme, vrať
 converter na upstream verzi.
 
-## D. Rozšíření IČ pro zahraniční registrační čísla — ADOPT UPSTREAM, kdyby dodal
-| Soubor | Co |
-|---|---|
-| `db/migrations/0076_widen_ic_for_foreign_registration.sql` | `clients.ic`/`supplier.ic` → VARCHAR(32) (přečíslováno z 0070 kvůli kolizi s upstream `0070_payment_due_unit`) |
-| kód `99c045c` | související import handling |
+**Stav po mergi v4.33.0 (2026-06-16): KEEP — naše razítko zůstává.** Upstream přidal jen
+**kryptografický PAdES podpis** (P12 cert + TSA, migrace `0076_supplier_pdf_signing`,
+`0077_supplier_tsa_auth`, `0091–0093_signing_profiles`, stránka `ElectronicSignatures.vue`) —
+to je *jiná* feature než náš vizuální obrázek do `signature_path`. `EmailBrandingAction` upstream
+upload razítka nemá. Settings konflikty vyřešeny **sloučením obojího** (naše razítko + jejich
+signing profily). `Settings.vue`: upstream přesunul currency-účty do nové `BankAccounts.vue`, tak
+jsme **vzali upstream verzi a znovu aplikovali jen náš razítko blok** (script + branding UI).
 
-**Merge akce:** Když upstream přidá ekvivalentní rozšíření `ic` → **adoptuj jejich, naši 0076
-dropni.** Vždy hlídej **kolize čísel migrací** (upstream přidává `00NN_*.sql`); naše vlastní
-přečísluj nad jejich max (idempotentní, re-run neškodí).
+## D. Rozšíření IČ pro zahraniční registrační čísla — ✅ ADOPTOVÁNO UPSTREAM (v4.33.0)
+**Vyřešeno při mergi v4.33.0:** upstream dodal ekvivalent `db/migrations/0085_widen_ic_column.sql`
+(`clients.ic`/`supplier.ic` → VARCHAR(20)). Naši `0076_widen_ic_for_foreign_registration.sql`
+jsme **dropli** (`git rm`). VARCHAR(20) pokrývá i švýcarské `CHE-xxx.xxx.xxx` (15 znaků).
+Commit `99c045c` byl jen ta migrace (žádný separátní import kód) → nic osiřelého nezůstalo.
+
+_Pravidlo do budoucna:_ vždy hlídej **kolize čísel migrací** (upstream přidává `00NN_*.sql`);
+naše vlastní přečísluj nad jejich max (idempotentní, re-run neškodí).
 
 ## E. Instance-specific — NIKDY upstream
 | Soubor | Co | Pozn. |
 |---|---|---|
-| `db/migrations/0077_mark_all_invoices_paid.sql` | Jednorázové: všechny faktury → `paid` (po importu historických dokladů na TÉTO instanci) | ⚠️ Běží na každé čisté DB → kdokoli jiný by si označil faktury zaplacené. **Do upstreamu NIKDY.** Zvážit odstranění po doběhnutí (idempotentní, takže neškodí, ale je matoucí). |
+| `db/migrations/0113_mark_all_invoices_paid.sql` | Jednorázové: všechny faktury → `paid` (po importu historických dokladů na TÉTO instanci). Přečíslováno z 0077 → 0113 (nad upstream max 0112) při mergi v4.33.0. | ⚠️ Běží na každé čisté DB → kdokoli jiný by si označil faktury zaplacené. **Do upstreamu NIKDY.** Zvážit odstranění po doběhnutí (idempotentní, takže neškodí, ale je matoucí). |
 | `/faktury/` (gitignored) | Soukromá naskenovaná PDF pro jednorázový import | mimo git |
 
 ## F. Docs / specs — KEEP (bez konfliktu)
@@ -83,4 +90,12 @@ přečísluj nad jejich max (idempotentní, re-run neškodí).
 upstream je nemá → bez konfliktu.
 
 ---
-_Naposledy aktualizováno: 2026-05-30 (po redesignu faktury + uploadu razítka)._
+## B. Redesign PDF faktury — KEEP + přeneseno (v4.33.0)
+Při mergi v4.33.0 jsme **drželi náš layout/CSS** (`invoice.twig`, `invoice.css`, `PdfBranding.php`),
+ale **ručně přenesli novou daňovou logiku** z upstreamu do našich `party-kv` tabulek a meta-stripu:
+SK plátce DPH (DIČ vs IČ DPH, #120), národní daňová čísla klienta (SK/DE/AT/PL/HU `tax_number`,
+#120), identifikovaná osoba (§ 6g–6l, #94 — vynechání řádku „Není plátce DPH" na zahr. RC dokladu).
+Upstream font `jetbrainsmono` jsme do našeho CSS *nepřebírali* (držíme `DejaVu Sans Mono`).
+
+---
+_Naposledy aktualizováno: 2026-06-16 (merge upstream v4.6.0 → v4.33.0)._

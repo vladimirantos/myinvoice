@@ -55,13 +55,24 @@ const form = ref<ProjectPayload>({
   note: null,
   default_revenue_category_id: null,
   billing_emails: [],
+  billing_emails_mode: 'auto',
 })
 
-const billingEmailInput = ref<{ position: 1 | 2 | 3; email: string; label: string }[]>([
-  { position: 1, email: '', label: '' },
-  { position: 2, email: '', label: '' },
-  { position: 3, email: '', label: '' },
+// usages (#86): pro které typy zpráv se e-mail použije; default vše zaškrtnuté.
+const PROJECT_EMAIL_USAGES = ['documents', 'reminders', 'approvals'] as const
+type ProjectEmailUsage = typeof PROJECT_EMAIL_USAGES[number]
+const allUsages = (): ProjectEmailUsage[] => [...PROJECT_EMAIL_USAGES]
+
+const billingEmailInput = ref<{ position: 1 | 2 | 3; email: string; label: string; usages: ProjectEmailUsage[] }[]>([
+  { position: 1, email: '', label: '', usages: allUsages() },
+  { position: 2, email: '', label: '', usages: allUsages() },
+  { position: 3, email: '', label: '', usages: allUsages() },
 ])
+
+function toggleBillingUsage(i: number, code: ProjectEmailUsage) {
+  const u = billingEmailInput.value[i].usages
+  billingEmailInput.value[i].usages = u.includes(code) ? u.filter(x => x !== code) : [...u, code]
+}
 
 // Splatnost zakázky — preset selector. Zakázka má vždy konkrétní hodnotu (žádné
 // „dědit"); 'month' = 1 kalendářní měsíc (days=1, unit='month'), 'custom' odhalí
@@ -101,13 +112,14 @@ onMounted(async () => {
     const p = await projectsApi.get(projectId.value)
     Object.assign(form.value, sanitize(p))
     client.value = await clientsApi.get(p.client_id)
-    // Naplň billing inputy
+    // Naplň billing inputy (usages null/prázdné = všechny typy zpráv)
     for (let i = 0; i < 3; i++) {
       const found = p.billing_emails.find((b) => b.position === ((i + 1) as 1 | 2 | 3))
       billingEmailInput.value[i] = {
         position: (i + 1) as 1 | 2 | 3,
         email: found?.email || '',
         label: found?.label || '',
+        usages: found?.usages?.length ? [...found.usages] as ProjectEmailUsage[] : allUsages(),
       }
     }
   } else {
@@ -148,6 +160,7 @@ function sanitize(p: Project): Partial<ProjectPayload> {
     requires_work_report_approval: !!p.requires_work_report_approval,
     note: p.note ?? null,
     default_revenue_category_id: p.default_revenue_category_id ?? null,
+    billing_emails_mode: p.billing_emails_mode ?? 'auto',
   }
 }
 
@@ -155,13 +168,14 @@ async function submit() {
   submitting.value = true
   error.value = ''
   try {
-    // Připrav billing emails
+    // Připrav billing emails (usages: všechny tři / žádný → backend uloží NULL = vše)
     const emails: BillingEmail[] = billingEmailInput.value
       .filter((e) => e.email.trim())
       .map((e) => ({
         position: e.position,
         email: e.email.trim(),
         label: e.label.trim() || null,
+        usages: e.usages,
       }))
     form.value.billing_emails = emails
 
@@ -284,21 +298,46 @@ async function submit() {
           </div>
         </div>
 
-        <!-- Billing emails -->
-        <div class="border-t border-neutral-200 pt-4">
-          <h3 class="text-sm font-semibold mb-1">{{ t('project.billing_emails') }}</h3>
-          <p class="text-xs text-neutral-500 mb-3">
-            {{ $i18n.locale === 'cs'
-              ? 'Vedle hlavního emailu klienta budou faktury chodit i na tyto adresy.'
-              : 'Invoices will be sent to these addresses in addition to the client\'s main email.' }}
-          </p>
-          <div class="space-y-2">
-            <div v-for="(_, i) in billingEmailInput" :key="i" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <!-- Billing emails — boxík ve stylu e-mailových kontaktů u klienta (#86) -->
+        <div class="border border-neutral-200 rounded-md p-3 space-y-3">
+          <div>
+            <div class="text-sm font-medium text-neutral-700">{{ t('project.billing_emails') }}</div>
+            <p class="text-xs text-neutral-500 mt-0.5">
+              {{ $i18n.locale === 'cs'
+                ? 'Vedle hlavního emailu klienta budou faktury chodit i na tyto adresy.'
+                : 'Invoices will be sent to these addresses in addition to the client\'s main email.' }}
+            </p>
+          </div>
+
+          <div v-for="(_, i) in billingEmailInput" :key="i"
+            :class="['rounded-md p-3 space-y-2', billingEmailInput[i].email.trim() ? 'border border-neutral-200 bg-neutral-50/50' : 'border border-dashed border-neutral-200']">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <input autocomplete="off" v-model="billingEmailInput[i].email" type="email" :placeholder="`Email #${i + 1}`"
-                class="sm:col-span-2 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                class="sm:col-span-2 h-9 px-2.5 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
               <input autocomplete="off" v-model="billingEmailInput[i].label" :placeholder="$i18n.locale === 'cs' ? 'Popisek (účetní, PM…)' : 'Label (accountant, PM…)'"
-                class="h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+                class="h-9 px-2.5 border border-neutral-300 rounded-md text-sm bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
             </div>
+            <!-- Účely (#86) — pro které typy zpráv se e-mail použije; vše zaškrtnuté = default -->
+            <div v-if="billingEmailInput[i].email.trim()" class="flex items-center gap-x-4 gap-y-1 flex-wrap text-sm">
+              <label v-for="code in PROJECT_EMAIL_USAGES" :key="code" class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" :checked="billingEmailInput[i].usages.includes(code)" @change="toggleBillingUsage(i, code)"
+                  class="rounded border-neutral-300 text-primary-600" />
+                <span class="text-neutral-700">{{ t(`client.email_contacts.usage.${code}`) }}</span>
+              </label>
+              <span v-if="!billingEmailInput[i].usages.length" class="text-xs text-neutral-400">{{ t('project.billing_email_no_usage_hint') }}</span>
+            </div>
+          </div>
+
+          <!-- Režim kombinace s kontakty/hlavním e-mailem klienta (#86) -->
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('project.billing_emails_mode') }}</label>
+            <select v-model="form.billing_emails_mode"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none">
+              <option value="auto">{{ t('project.billing_emails_mode_auto') }}</option>
+              <option value="append">{{ t('project.billing_emails_mode_append') }}</option>
+              <option value="replace">{{ t('project.billing_emails_mode_replace') }}</option>
+            </select>
+            <p class="text-xs text-neutral-500 mt-1">{{ t('project.billing_emails_mode_hint') }}</p>
           </div>
         </div>
 

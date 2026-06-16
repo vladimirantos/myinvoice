@@ -22,6 +22,7 @@ import { useI18n } from 'vue-i18n'
 import { invoicesApi, type WorkReportItem } from '@/api/invoices'
 import { codebooksApi, type Unit } from '@/api/codebooks'
 import { useToast } from '@/composables/useToast'
+import { focusLastRow } from '@/composables/useRowFocus'
 import { apiErrorMessage } from '@/api/errors'
 
 const { t } = useI18n()
@@ -97,6 +98,7 @@ function addItem() {
     rate: defaultRate.value,
     order_index: wrItems.value.length,
   })
+  focusLastRow('[data-row-input="wr-modal"]')
 }
 
 function removeItem(idx: number) {
@@ -223,7 +225,8 @@ onMounted(() => {
                  class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
         </div>
 
-        <div class="overflow-x-auto">
+        <!-- Desktop: tabulka -->
+        <div class="hidden md:block overflow-x-auto">
           <table class="w-full text-sm">
             <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
               <tr>
@@ -236,7 +239,7 @@ onMounted(() => {
                 <th class="px-2 py-2 w-10"></th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-neutral-100">
+            <tbody class="divide-y divide-neutral-200">
               <tr v-for="(it, i) in wrItems" :key="i">
                 <td class="px-2 py-2 text-center text-xs text-neutral-400">
                   <button type="button" @click="moveItem(i, -1)" :disabled="i === 0"
@@ -247,7 +250,7 @@ onMounted(() => {
                           class="block w-5 h-4 hover:text-neutral-700 disabled:opacity-30">▼</button>
                 </td>
                 <td class="px-3 py-1.5">
-                  <input v-model="it.description" type="text" maxlength="500"
+                  <input v-model="it.description" type="text" maxlength="500" data-row-input="wr-modal"
                          class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                 </td>
                 <td class="px-3 py-1.5">
@@ -275,7 +278,7 @@ onMounted(() => {
               <tr>
                 <td colspan="3" class="p-2">
                   <button type="button" @click="addItem"
-                          class="cursor-pointer px-3 h-8 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 font-medium rounded-md inline-flex items-center gap-1">
+                          class="cursor-pointer px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center gap-1">
                     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
                     {{ t('invoice.wr_add_item') }}
                   </button>
@@ -292,6 +295,63 @@ onMounted(() => {
               </tr>
             </tfoot>
           </table>
+        </div>
+
+        <!-- Mobile: stack karet (zrcadlí mobilní karty položek v detailu faktury) -->
+        <div class="md:hidden border border-neutral-200 rounded-lg overflow-hidden">
+          <div class="divide-y divide-neutral-100">
+            <div v-for="(it, i) in wrItems" :key="`m-${i}`" class="p-3 space-y-2">
+              <div class="flex items-start gap-2">
+                <input v-model="it.description" type="text" maxlength="500" data-row-input="wr-modal"
+                       :placeholder="t('invoice.wr_description')"
+                       class="flex-1 min-w-0 h-9 px-2 border border-neutral-300 rounded text-sm" />
+                <div class="flex items-center gap-1 shrink-0 pt-0.5 text-neutral-400">
+                  <button type="button" @click="moveItem(i, -1)" :disabled="i === 0"
+                          :title="t('invoice.wr_move_up')"
+                          class="cursor-pointer w-7 h-7 rounded border border-neutral-200 hover:text-neutral-700 disabled:opacity-30">▲</button>
+                  <button type="button" @click="moveItem(i, 1)" :disabled="i === wrItems.length - 1"
+                          :title="t('invoice.wr_move_down')"
+                          class="cursor-pointer w-7 h-7 rounded border border-neutral-200 hover:text-neutral-700 disabled:opacity-30">▼</button>
+                  <button type="button" @click="removeItem(i)" :title="t('common.delete')"
+                          class="cursor-pointer w-7 h-7 rounded border border-danger-500/30 text-danger-500 hover:bg-danger-50 text-base leading-none">&times;</button>
+                </div>
+              </div>
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="block text-[11px] text-neutral-500 mb-0.5">{{ t('invoice.wr_date') }}</label>
+                  <input v-model="it.work_date" type="date"
+                         class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
+                </div>
+                <div>
+                  <label class="block text-[11px] text-neutral-500 mb-0.5">{{ t('invoice.wr_hours') }}</label>
+                  <input v-model.number="it.hours" type="number" step="0.25" min="0" inputmode="decimal"
+                         class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
+                </div>
+                <div>
+                  <label class="block text-[11px] text-neutral-500 mb-0.5">{{ t('invoice.wr_rate') }}</label>
+                  <input v-model.number="it.rate" type="number" step="1" min="0" inputmode="decimal"
+                         class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
+                </div>
+              </div>
+              <div class="flex items-baseline justify-between text-sm">
+                <span class="text-xs text-neutral-500">{{ t('invoice.totals.total') }}</span>
+                <span class="font-mono font-medium">
+                  {{ ((Number(it.hours)||0) * (Number(it.rate)||0)).toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} {{ currency }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="bg-neutral-50 border-t border-neutral-200 p-3 space-y-2">
+            <button type="button" @click="addItem"
+                    class="cursor-pointer w-full h-9 text-sm bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-md inline-flex items-center justify-center gap-1">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+              {{ t('invoice.wr_add_item') }}
+            </button>
+            <div v-if="wrItems.length > 0" class="flex items-baseline justify-between text-sm font-semibold">
+              <span class="font-mono"><span class="text-neutral-400 font-normal mr-1">Σ</span>{{ totalHours.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} h</span>
+              <span class="font-mono">{{ totalAmount.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }} {{ currency }}</span>
+            </div>
+          </div>
         </div>
 
         <div v-if="error" class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">

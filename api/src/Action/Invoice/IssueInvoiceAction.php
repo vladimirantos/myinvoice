@@ -30,6 +30,8 @@ use Psr\Http\Message\ServerRequestInterface as Request;
  */
 final class IssueInvoiceAction
 {
+    use HandlesVarsymbolDuplicate;
+
     public function __construct(
         private readonly InvoiceRepository $repo,
         private readonly Connection $db,
@@ -66,6 +68,25 @@ final class IssueInvoiceAction
         }
         if ($invoice['invoice_type'] === 'cancellation') {
             return Json::error($response, 'invalid_type', 'Storno nedostává varsymbol.', 422);
+        }
+        // Daňový doklad k přijaté platbě nelze vystavit, když už k proformě existuje
+        // (nestornovaný) finál — jeho § 37a odpočty jsou zafixované a stejná úplata
+        // by se zdanila podruhé. Draft DD smaž, nebo nejdřív stornuj finál.
+        if ($invoice['invoice_type'] === 'tax_document' && (int) ($invoice['parent_invoice_id'] ?? 0) > 0) {
+            $fin = $this->db->pdo()->prepare(
+                "SELECT 1 FROM invoices
+                  WHERE parent_invoice_id = ? AND invoice_type = 'invoice' AND status <> 'cancelled'
+                  LIMIT 1"
+            );
+            $fin->execute([(int) $invoice['parent_invoice_id']]);
+            if ($fin->fetchColumn() !== false) {
+                return Json::error(
+                    $response,
+                    'final_exists',
+                    'K zálohové faktuře už existuje finální doklad — daňový doklad k platbě by úplatu zdanil podruhé. Smaž tento koncept.',
+                    409,
+                );
+            }
         }
 
         // Pokud projekt vyžaduje schválení výkazu A faktura má výkaz, musí být approved.
@@ -106,7 +127,7 @@ final class IssueInvoiceAction
         } else {
             try {
                 $varsymbol = $this->varsymbol->next($supplierId, $invoice['invoice_type'], $issueDate, (int) $invoice['client_id']);
-            } catch (\InvalidArgumentException $e) {
+            } catch (\InvalidArgumentException | \RuntimeException $e) {
                 return Json::error($response, 'varsymbol_failed', $e->getMessage(), 500);
             }
         }
@@ -117,22 +138,49 @@ final class IssueInvoiceAction
             return Json::error($response, 'snapshot_failed', $e->getMessage(), 500);
         }
 
+        // Finální daňový doklad plně pokrytý zálohou (amount_to_pay <= 0) je fakticky
+        // zaplacený už při vystavení — záloha dorazila dřív. Označíme ho rovnou jako
+        // 'paid' (paid_at = issue_date dokladu, datum se váže na daňový doklad, ne na
+        // proformu), jinak by zbytečně visel jako nezaplacený/po splatnosti a reálné
+        // inkaso by chybělo v kasových reportech (cash-flow, limit paušální daně), které
+        // sčítají daňové doklady, ne proformy. Detail podmínky viz InvoiceAmountPolicy.
+        $autoPaid = InvoiceAmountPolicy::shouldAutoMarkPaidOnIssue($invoice);
+
         $stmt = $this->db->pdo()->prepare(
             'UPDATE invoices SET
                 varsymbol         = ?,
                 client_snapshot   = ?,
                 supplier_snapshot = ?,
                 bank_snapshot     = ?,
-                status            = "issued"
+                status            = ?,
+                paid_at           = ?
              WHERE id = ? AND status = "draft"'
         );
-        $stmt->execute([
-            $varsymbol,
-            json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
-            json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
-            $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
-            $id,
-        ]);
+        try {
+            $stmt->execute([
+                $varsymbol,
+                json_encode($snapshots['client'],   JSON_UNESCAPED_UNICODE),
+                json_encode($snapshots['supplier'], JSON_UNESCAPED_UNICODE),
+                $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
+                $autoPaid ? 'paid' : 'issued',
+                // Daňový doklad k přijaté platbě: paid_at = den přijetí úplaty (tax_date/DUZP),
+                // ne den vystavení dokladu — kasové reporty mají vidět skutečné inkaso.
+                $autoPaid
+                    ? ($invoice['invoice_type'] === 'tax_document'
+                        ? ($invoice['tax_date'] ?? $invoice['issue_date'])
+                        : $invoice['issue_date'])
+                    : null,
+                $id,
+            ]);
+        } catch (\PDOException $e) {
+            // Poslední pojistka proti porušení unique indexu (supplier_id, varsymbol) — typicky
+            // souběžné vystavení nebo číslo, které proklouzlo kontrolami. Generátor se sice
+            // duplicitám aktivně vyhýbá, ale DB constraint je definitivní ochrana proti race.
+            if ($dupMsg = self::varsymbolDuplicateMessage($e, $varsymbol)) {
+                return Json::error($response, 'varsymbol_duplicate', $dupMsg, 409);
+            }
+            throw $e;
+        }
 
         if ($stmt->rowCount() === 0) {
             return Json::error($response, 'race_condition', 'Faktura byla mezitím změněna.', 409);
@@ -146,6 +194,13 @@ final class IssueInvoiceAction
             'total'     => $invoice['total_with_vat'],
             'currency'  => $invoice['currency'],
         ], $ip, $request->getHeaderLine('User-Agent'));
+
+        if ($autoPaid) {
+            $this->logger->log('invoice.paid', $user['id'] ?? null, 'invoice', $id, [
+                'paid_at' => $invoice['issue_date'],
+                'trigger' => 'advance_fully_covered',
+            ], $ip, $request->getHeaderLine('User-Agent'));
+        }
 
         $this->stats->recomputeForInvoiceId($id);
         // Smaž cached draft PDF (Faktura-draft-NN.pdf) — po vystavení má faktura nový

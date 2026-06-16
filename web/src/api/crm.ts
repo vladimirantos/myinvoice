@@ -24,6 +24,14 @@ export interface CrmOverview {
   current_month: CrmKpi[]
   last_month: CrmKpi[]
   ytd: CrmKpi[]
+  /** Klouzavých 12 měsíců (vč. aktuálního) per měna. */
+  last_12m: CrmKpi[]
+  /** Předchozích 12 měsíců (pro trailing YoY). */
+  prev_12m: CrmKpi[]
+  /** Celý předchozí kalendářní rok. */
+  prev_year_full: CrmKpi[]
+  /** Loni do stejného měsíce (fair YTD YoY). */
+  prev_year_ytd: CrmKpi[]
   currencies: string[]
 }
 

@@ -70,7 +70,7 @@ Options -Indexes -MultiViews
     Header always set Cross-Origin-Resource-Policy "same-site"
     # CSP: doplněno unpkg.com (Swagger UI) + cdn.redoc.ly (Redoc) pro /api/docs a /api/reference.
     # Sladěno s web.config (IIS). worker-src 'self' blob: je nutné pro Swagger UI tryItOut request snippety.
-    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: https://validator.swagger.io https://cdn.redoc.ly; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://unpkg.com https://cdn.redoc.ly; worker-src 'self' blob:; font-src 'self' data:; connect-src 'self' https://unpkg.com https://cdn.redoc.ly; frame-src 'self' https://challenges.cloudflare.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: https://validator.swagger.io https://cdn.redoc.ly; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://unpkg.com https://cdn.redoc.ly; worker-src 'self' blob:; font-src 'self' data:; connect-src 'self' https://unpkg.com https://cdn.redoc.ly; frame-src 'self' blob: https://challenges.cloudflare.com; object-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
     Header unset Server
     Header unset X-Powered-By
 </IfModule>
@@ -79,6 +79,17 @@ Options -Indexes -MultiViews
 <FilesMatch "\.(woff2|woff|ttf|otf|eot|js|css|svg|png|jpg|jpeg|webp|ico)$">
     <IfModule mod_headers.c>
         Header set Cache-Control "public, max-age=31536000, immutable"
+    </IfModule>
+</FilesMatch>
+
+# SPA entry (index.html) NESMÍ být cachovaná. Hashed assety výše jsou immutable, ale
+# index.html drží mapu na jejich aktuální hashe — když ji prohlížeč cachuje, po updatu
+# servíruje starou index.html odkazující na staré (z nového buildu smazané) chunky →
+# „Failed to fetch dynamically imported module" u lazy-loaded rout (issue #140).
+# Zrcadlí outboundRule „HTML no-cache" ve web.config (IIS), kde to už řešené je.
+<FilesMatch "\.html$">
+    <IfModule mod_headers.c>
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
     </IfModule>
 </FilesMatch>
 

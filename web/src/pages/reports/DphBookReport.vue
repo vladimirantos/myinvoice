@@ -10,6 +10,7 @@ const { t, locale } = useI18n()
 const now = new Date()
 const year = ref(now.getFullYear())
 const month = ref(now.getMonth() + 1)
+const periodType = ref<'monthly' | 'quarterly'>('monthly')
 
 const preview = ref<DphBookPreview | null>(null)
 const loading = ref(false)
@@ -19,7 +20,7 @@ async function loadPreview() {
   loading.value = true
   error.value = ''
   try {
-    preview.value = await reportsApi.dphBookPreview(year.value, month.value)
+    preview.value = await reportsApi.dphBookPreview(year.value, month.value, periodType.value)
   } catch (e) {
     error.value = apiErrorMessage(e)
   } finally {
@@ -28,7 +29,7 @@ async function loadPreview() {
 }
 
 function downloadPdf() {
-  window.open(reportsApi.dphBookPdfUrl(year.value, month.value), '_blank')
+  window.open(reportsApi.dphBookPdfUrl(year.value, month.value, periodType.value), '_blank')
 }
 
 const monthOptions = computed(() =>
@@ -38,6 +39,14 @@ const monthOptions = computed(() =>
 )
 // Distinct roky z dat (issue #33).
 const yearOptions = useYearOptions('combined', year)
+
+const quarterOptions = [1, 2, 3, 4]
+const isQuarterly = computed(() => periodType.value === 'quarterly')
+// Kvartální období: $month nese (jako u DPH přiznání) poslední měsíc kvartálu (3/6/9/12).
+const currentQuarter = computed(() => Math.ceil(month.value / 3))
+function setQuarter(q: number) {
+  month.value = q * 3
+}
 
 function fmtMoney(v: number): string {
   return new Intl.NumberFormat(locale.value === 'en' ? 'en-US' : 'cs-CZ', {
@@ -53,7 +62,7 @@ function fmtDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'cs-CZ')
 }
 
-watch([year, month], loadPreview)
+watch([year, month, periodType], loadPreview)
 onMounted(loadPreview)
 </script>
 
@@ -78,8 +87,26 @@ onMounted(loadPreview)
         <h1 class="text-2xl font-semibold">{{ t('reports.dph_book.title') }}</h1>
         <p class="text-sm text-neutral-500 mt-0.5">{{ t('reports.dph_book.subtitle') }}</p>
       </div>
-      <div class="flex items-center gap-2">
-        <select v-model.number="month" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+      <div class="flex items-center gap-2 flex-wrap">
+        <!-- Period toggle (měsíční / kvartální) -->
+        <div class="flex rounded-md border border-neutral-300 overflow-hidden text-sm">
+          <button type="button" @click="periodType = 'monthly'"
+            :class="periodType === 'monthly' ? 'bg-primary-600 text-white' : 'bg-surface text-neutral-700 hover:bg-neutral-50'"
+            class="px-3 h-9 cursor-pointer">
+            {{ t('reports.dph.monthly') }}
+          </button>
+          <button type="button" @click="periodType = 'quarterly'"
+            :class="periodType === 'quarterly' ? 'bg-primary-600 text-white' : 'bg-surface text-neutral-700 hover:bg-neutral-50'"
+            class="px-3 h-9 cursor-pointer border-l border-neutral-300">
+            {{ t('reports.dph.quarterly') }}
+          </button>
+        </div>
+        <!-- Quarter picker pokud quarterly, jinak month -->
+        <select v-if="isQuarterly" :value="currentQuarter" @change="setQuarter(Number(($event.target as HTMLSelectElement).value))"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option v-for="q in quarterOptions" :key="q" :value="q">Q{{ q }}</option>
+        </select>
+        <select v-else v-model.number="month" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
         <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">

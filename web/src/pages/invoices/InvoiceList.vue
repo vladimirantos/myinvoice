@@ -2,11 +2,13 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
 import { invoicesApi, type MonthGroup, type InvoiceListItem } from '@/api/invoices'
-import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass } from '@/composables/useFormat'
+import { formatMoney, formatDate, formatMonth, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass, displayStatus, taxDateClass } from '@/composables/useFormat'
 import { useHotkey } from '@/composables/useHotkey'
+import { useRowLink } from '@/composables/useRowLink'
 import { useToast } from '@/composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useSupplierStore } from '@/stores/supplier'
 import { clientsApi, type Client } from '@/api/clients'
 import { codebooksApi, type Currency } from '@/api/codebooks'
 import { useYearOptions } from '@/composables/useYearOptions'
@@ -18,6 +20,8 @@ import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 const { t, tm, rt } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
+const supplierStore = useSupplierStore()
+const thanksEnabled = computed(() => supplierStore.currentSupplier?.payment_thanks_enabled ?? false)
 
 useHotkey('ctrl+n', (e) => { e.preventDefault(); router.push('/invoices/new') })
 
@@ -165,24 +169,37 @@ async function bulkMarkPaid() {
     return
   }
   if (!confirm(t('invoice.bulk_mark_paid_confirm', { n: list.length }))) return
+  // Volitelně i poděkování za úhradu (issue #57) — jen pokud má dodavatel funkci zapnutou.
+  const sendThanks = thanksEnabled.value && confirm(t('invoice.bulk_send_thanks_confirm', { n: list.length }))
   const today = new Date().toISOString().slice(0, 10)
   bulkBusy.value = true
   let okCount = 0
+  let thanksSent = 0
+  let thanksFailed = 0
   const errors: string[] = []
   try {
     for (const inv of list) {
       try {
-        await invoicesApi.markPaid(inv.id, today)
+        const updated = await invoicesApi.markPaid(inv.id, today, sendThanks ? { sendThanks: true, thanksTrigger: 'bulk' } : undefined)
         okCount++
+        const pt = updated.payment_thanks
+        if (pt?.status === 'sent') thanksSent++
+        else if (pt?.status === 'failed') thanksFailed++
       } catch (e: any) {
         errors.push(`${inv.varsymbol || `#${inv.id}`}: ${e?.response?.data?.error?.message || 'chyba'}`)
       }
     }
     selectedIds.value = []
+    let msg = errors.length
+      ? t('invoice.bulk_mark_paid_partial', { ok: okCount, err: errors.length })
+      : t('invoice.bulk_mark_paid_success', { n: okCount })
+    if (sendThanks) {
+      msg += '\n' + t('invoice.bulk_thanks_summary', { sent: thanksSent, failed: thanksFailed })
+    }
     if (errors.length) {
-      toast.warning(t('invoice.bulk_mark_paid_partial', { ok: okCount, err: errors.length }) + '\n' + errors.join('\n'))
+      toast.warning(msg + '\n' + errors.join('\n'))
     } else {
-      toast.success(t('invoice.bulk_mark_paid_success', { n: okCount }))
+      toast.success(msg)
     }
     await load()
   } finally {
@@ -293,6 +310,9 @@ function mergeGroups(existing: MonthGroup[], incoming: MonthGroup[]): MonthGroup
         found.without_vat = Math.round((found.without_vat + t.without_vat) * 100) / 100
         found.vat         = Math.round((found.vat         + t.vat)         * 100) / 100
         found.with_vat    = Math.round((found.with_vat    + t.with_vat)    * 100) / 100
+        found.draft_without_vat = Math.round((found.draft_without_vat + t.draft_without_vat) * 100) / 100
+        found.draft_vat         = Math.round((found.draft_vat         + t.draft_vat)         * 100) / 100
+        found.draft_with_vat    = Math.round((found.draft_with_vat    + t.draft_with_vat)    * 100) / 100
       } else {
         cur.totals_per_currency.push({ ...t })
       }
@@ -421,8 +441,9 @@ watch(() => route.query, (newQ) => {
 
 const loadedCount = computed(() => groups.value.reduce((s, g) => s + g.count, 0))
 
-function openInvoice(inv: InvoiceListItem) {
-  router.push(`/invoices/${inv.id}`)
+const navigateRow = useRowLink()
+function openInvoice(inv: InvoiceListItem, e?: MouseEvent) {
+  navigateRow(`/invoices/${inv.id}`, e)
 }
 
 // Work Report modal: otevíráno z buttonu "Výkaz" v sloupci Stav.
@@ -586,9 +607,14 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
             <span class="text-xs text-neutral-500">{{ g.count }} {{ g.count === 1 ? t('invoice.doc_1') : (g.count < 5 ? t('invoice.doc_2_4') : t('invoice.doc_5plus')) }}</span>
           </div>
           <div class="flex items-center gap-3 text-xs">
-            <span v-for="t in g.totals_per_currency" :key="t.currency" class="font-mono">
-              <span class="text-neutral-500">{{ t.currency }}:</span>
-              <span class="font-semibold text-neutral-900 ml-1">{{ formatMoney(t.with_vat, t.currency) }}</span>
+            <span v-for="tot in g.totals_per_currency" :key="tot.currency" class="font-mono">
+              <span class="text-neutral-500">{{ tot.currency }}:</span>
+              <span class="font-semibold text-neutral-900 ml-1">{{ formatMoney(tot.with_vat, tot.currency) }}</span>
+              <span v-if="tot.draft_with_vat !== 0" class="ml-1 text-primary-600"
+                :title="t('invoice.prediction_hint', { amount: formatMoney(tot.draft_with_vat, tot.currency) })">
+                → {{ formatMoney(tot.with_vat + tot.draft_with_vat, tot.currency) }}
+                <span class="text-[10px] uppercase tracking-wide text-primary-500">{{ t('invoice.prediction') }}</span>
+              </span>
             </span>
           </div>
         </header>
@@ -613,7 +639,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
               <tr
                 v-for="inv in g.invoices"
                 :key="inv.id"
-                @click="openInvoice(inv)"
+                @click="openInvoice(inv, $event)"
+                @auxclick.prevent="openInvoice(inv, $event)"
                 class="cursor-pointer hover:bg-neutral-50 transition"
                 :class="invoiceRowClass(inv.due_date, inv.status)"
               >
@@ -634,8 +661,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   <div v-if="inv.project_name" class="text-xs text-neutral-500 truncate max-w-md">{{ inv.project_name }}</div>
                 </td>
                 <td class="px-4 py-2.5 text-center text-xs text-neutral-600">{{ typeLabel(inv.invoice_type) }}</td>
-                <td class="px-4 py-2.5 text-center text-xs text-neutral-600">
-                  {{ formatDate(inv.tax_date || inv.issue_date) }}
+                <td class="px-4 py-2.5 text-center text-xs">
+                  <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                 </td>
                 <td class="px-4 py-2.5 text-center text-xs">
                   <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : 'text-neutral-600'">
@@ -646,17 +673,16 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                   {{ formatMoney(inv.amount_to_pay ?? inv.total_with_vat, inv.currency) }}
                 </td>
                 <td class="px-4 py-2.5 text-center" @click.stop>
-                  <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                       zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
-                  <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
+                  <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — rychlý přístup k modalu. -->
+                  <button v-if="inv.status === 'draft' && inv.invoice_type !== 'tax_document' && auth.canWrite"
                     @click="openWorkReport(inv.id)"
                     class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                     :title="t('invoice.wr_btn')">
                     <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2"/></svg>
                     {{ t('invoice.wr_btn') }}
                   </button>
-                  <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
-                    {{ statusLabel(inv.status) }}
+                  <span v-else class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(displayStatus(inv.status, inv.payment_status))">
+                    {{ statusLabel(displayStatus(inv.status, inv.payment_status)) }}
                   </span>
                   <span v-if="inv.sent_at" class="ml-1 text-xs px-1 py-0.5 rounded bg-success-50 text-success-600"
                     :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
@@ -674,7 +700,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           <div
             v-for="inv in g.invoices"
             :key="`m-${inv.id}`"
-            @click="openInvoice(inv)"
+            @click="openInvoice(inv, $event)"
+            @auxclick.prevent="openInvoice(inv, $event)"
             class="cursor-pointer hover:bg-neutral-50 transition px-3 py-3"
             :class="invoiceRowClass(inv.due_date, inv.status)"
           >
@@ -707,7 +734,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                 </div>
                 <div class="flex items-center justify-between gap-2 mt-2">
                   <div class="text-xs text-neutral-600 whitespace-nowrap">
-                    {{ formatDate(inv.tax_date || inv.issue_date) }}
+                    <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date || inv.issue_date) }}</span>
                     <span class="text-neutral-400"> → </span>
                     <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-500 font-medium' : ''">
                       {{ formatDate(inv.due_date) }}
@@ -718,9 +745,8 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
                       :title="t('invoice.sent_at', { date: formatDate(inv.sent_at) })">✉</span>
                     <span v-if="inv.reminder_count > 0" class="text-xs px-1 py-0.5 rounded bg-warning-50 text-warning-600 font-semibold"
                       :title="t('invoice.reminder_at', { count: inv.reminder_count, date: formatDate(inv.last_reminder_at) })">⚠ {{ inv.reminder_count }}</span>
-                    <!-- Pro koncepty s workflow projektem (nebo s již vytvořeným výkazem)
-                         zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
-                    <button v-if="inv.status === 'draft' && (inv.project_requires_approval || inv.has_work_report || inv.recurring_template_id)"
+                    <!-- Pro koncepty (s právem editace) zobraz tlačítko "Výkaz" místo "KONCEPT" badge — stejně jako v desktop tabulce. -->
+                    <button v-if="inv.status === 'draft' && inv.invoice_type !== 'tax_document' && auth.canWrite"
                       @click="openWorkReport(inv.id)"
                       class="cursor-pointer text-xs px-2 py-0.5 rounded border border-primary-500/40 text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1"
                       :title="t('invoice.wr_btn')">

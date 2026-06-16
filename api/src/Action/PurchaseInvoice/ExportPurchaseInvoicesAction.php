@@ -10,6 +10,9 @@ use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Service\ActivityLogger;
+use MyInvoice\Service\Export\ExportFilename;
+use MyInvoice\Service\Export\ExportPeriod;
+use MyInvoice\Service\Export\ExportPeriodResolver;
 use MyInvoice\Service\Export\PurchaseInvoiceExportService;
 use MyInvoice\Service\IpMatcher;
 use MyInvoice\Service\Pdf\PurchaseInvoicePdfRenderer;
@@ -19,9 +22,10 @@ use Slim\Psr7\Stream;
 use ZipArchive;
 
 /**
- * GET /api/purchase-invoices/export?month=YYYY-MM&format=pdf-zip[&date_by=tax|issue]
+ * GET /api/purchase-invoices/export?month=YYYY-MM&format=pdf-zip[&date_by=tax|issue|received]
+ * GET /api/purchase-invoices/export?period=quarterly&year=YYYY&quarter=1..4&format=pdf-zip
  *
- * Export přijatých faktur za měsíc jako ZIP s **vendor original PDF**.
+ * Export přijatých faktur za měsíc nebo čtvrtletí jako ZIP s **vendor original PDF**.
  *
  * Priorita per faktura:
  *   1) Archivovaný originál od dodavatele (pdf_path) → použij ten
@@ -44,6 +48,7 @@ final class ExportPurchaseInvoicesAction
         private readonly IpMatcher $ipMatcher,
         private readonly PurchaseInvoiceExportService $exporter,
         private readonly PurchaseInvoicePdfRenderer $renderer,
+        private readonly ExportPeriodResolver $periodResolver,
     ) {}
 
     public function __invoke(Request $request, Response $response): Response
@@ -55,9 +60,10 @@ final class ExportPurchaseInvoicesAction
         }
 
         $q = $request->getQueryParams();
-        $month = (string) ($q['month'] ?? '');
-        if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
-            return Json::error($response, 'validation_failed', 'Parametr month musí být YYYY-MM.', 400);
+        try {
+            $period = $this->periodResolver->resolve($q);
+        } catch (\InvalidArgumentException $e) {
+            return Json::error($response, 'validation_failed', $e->getMessage(), 400);
         }
         $dateBy = (string) ($q['date_by'] ?? 'tax');  // tax|issue|received
         if (!in_array($dateBy, ['tax', 'issue', 'received'], true)) {
@@ -69,17 +75,17 @@ final class ExportPurchaseInvoicesAction
         }
 
         $sid = SupplierGuard::currentId($request);
-        $rows = $this->findInvoices($sid, $month, $dateBy);
+        $rows = $this->findInvoices($sid, $period, $dateBy);
         if (empty($rows)) {
-            return Json::error($response, 'no_invoices', "Za měsíc {$month} nejsou žádné přijaté faktury.", 404);
+            return Json::error($response, 'no_invoices', "Za období {$period->label} nejsou žádné přijaté faktury.", 404);
         }
 
         // ISDOC bulk ZIP nebo Pohoda dataPack → delegujeme do separate metod
         if ($format === 'isdoc') {
-            return $this->exportIsdocZip($response, $request, $rows, $month, $sid);
+            return $this->exportIsdocZip($response, $request, $rows, $period, $sid);
         }
         if ($format === 'pohoda') {
-            return $this->exportPohodaDataPack($response, $request, $rows, $month, $sid);
+            return $this->exportPohodaDataPack($response, $request, $rows, $period, $sid);
         }
         // (pdf-zip pokračuje níže — original code)
 
@@ -101,8 +107,9 @@ final class ExportPurchaseInvoicesAction
             $id = (int) $r['id'];
             $vs = (string) ($r['varsymbol'] ?? $r['vendor_invoice_number'] ?? ('id-' . $id));
             $vendor = (string) ($r['vendor_company_name'] ?? 'vendor');
-            // Sanitize filename pro ZIP entry (zip-slip via varsymbol/vendor name)
-            $entryBase = substr(preg_replace('/[^A-Za-z0-9._\\-]/u', '_', $vs . '-' . $vendor) ?: 'invoice', 0, 100);
+            // Sanitize filename pro ZIP entry (zip-slip via varsymbol/vendor name).
+            // Diakritiku v názvu firmy přepíšeme na ASCII (č→c, ě→e, …), ne na podtržítka.
+            $entryBase = substr(ExportFilename::sanitize($vs . '-' . $vendor, 'invoice'), 0, 100);
 
             // 1) Archivovaný originál od dodavatele má přednost. Resolve relativní path
             //    + path-traversal guard (zip-slip). Pokud byl originál očekáván
@@ -148,14 +155,21 @@ final class ExportPurchaseInvoicesAction
         if ($included === 0) {
             @unlink($tmpZip);
             return Json::error($response, 'no_invoices_processed',
-                "Za měsíc {$month} se nepodařilo vyexportovat žádnou přijatou fakturu.",
+                "Za období {$period->label} se nepodařilo vyexportovat žádnou přijatou fakturu.",
                 500,
                 ['skipped' => $skipped],
             );
         }
 
         $this->logger->log('purchase_invoices.exported', $user['id'] ?? null, null, null, [
-            'format' => 'pdf-zip', 'month' => $month, 'date_by' => $dateBy,
+            'format' => 'pdf-zip',
+            'period' => $period->label,
+            'period_type' => $period->type,
+            'month' => $period->month,
+            'quarter' => $period->quarter,
+            'date_from' => $period->dateFrom,
+            'date_to_exclusive' => $period->dateToExclusive,
+            'date_by' => $dateBy,
             'included' => $included, 'reconstructed' => $reconstructed, 'skipped_count' => count($skipped),
         ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
 
@@ -176,7 +190,7 @@ final class ExportPurchaseInvoicesAction
         $r = $response
             ->withBody($stream)
             ->withHeader('Content-Type', 'application/zip')
-            ->withHeader('Content-Disposition', 'attachment; filename="purchase-invoices-' . $month . '.zip"')
+            ->withHeader('Content-Disposition', 'attachment; filename="purchase-invoices-' . $period->label . '.zip"')
             ->withHeader('Content-Length', (string) $size)
             ->withHeader('X-Export-Reconstructed', (string) $reconstructed);
         if (!empty($skipped)) {
@@ -192,7 +206,7 @@ final class ExportPurchaseInvoicesAction
     /**
      * @return list<array<string,mixed>>
      */
-    private function findInvoices(int $supplierId, string $month, string $dateBy): array
+    private function findInvoices(int $supplierId, ExportPeriod $period, string $dateBy): array
     {
         $dateExpr = match ($dateBy) {
             'received' => 'pi.received_at',
@@ -206,11 +220,12 @@ final class ExportPurchaseInvoicesAction
                   FROM purchase_invoices pi
                   JOIN clients c ON c.id = pi.vendor_id
                  WHERE pi.supplier_id = ?
-                   AND DATE_FORMAT($dateExpr, '%Y-%m') = ?
+                   AND $dateExpr >= ?
+                   AND $dateExpr < ?
                    AND pi.status IN ('received', 'booked', 'paid')
                  ORDER BY $dateExpr, pi.id";
         $stmt = $this->db->pdo()->prepare($sql);
-        $stmt->execute([$supplierId, $month]);
+        $stmt->execute([$supplierId, $period->dateFrom, $period->dateToExclusive]);
         return $stmt->fetchAll(\PDO::FETCH_ASSOC);
     }
 
@@ -228,7 +243,7 @@ final class ExportPurchaseInvoicesAction
      *
      * @param list<array<string,mixed>> $rows
      */
-    private function exportIsdocZip(Response $response, Request $request, array $rows, string $month, int $supplierId): Response
+    private function exportIsdocZip(Response $response, Request $request, array $rows, ExportPeriod $period, int $supplierId): Response
     {
         $tmpZip = tempnam(sys_get_temp_dir(), 'pinv-isdoc-') . '.zip';
         $zip = new ZipArchive();
@@ -247,7 +262,7 @@ final class ExportPurchaseInvoicesAction
             }
             $vs = (string) ($r['varsymbol'] ?? ('id-' . $r['id']));
             $vendor = (string) ($r['vendor_company_name'] ?? 'vendor');
-            $base = preg_replace('/[^A-Za-z0-9._\\-]/u', '_', $vs . '-' . $vendor) ?: 'invoice';
+            $base = ExportFilename::sanitize($vs . '-' . $vendor, 'invoice');
             $zip->addFromString('Prijata-' . substr($base, 0, 100) . '.isdoc', $xml);
             $included++;
         }
@@ -261,7 +276,14 @@ final class ExportPurchaseInvoicesAction
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $this->logger->log('purchase_invoices.exported', $user['id'] ?? null, null, null, [
-            'format' => 'isdoc-zip', 'month' => $month, 'included' => $included,
+            'format' => 'isdoc-zip',
+            'period' => $period->label,
+            'period_type' => $period->type,
+            'month' => $period->month,
+            'quarter' => $period->quarter,
+            'date_from' => $period->dateFrom,
+            'date_to_exclusive' => $period->dateToExclusive,
+            'included' => $included,
         ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
 
         $size = filesize($tmpZip);
@@ -278,80 +300,46 @@ final class ExportPurchaseInvoicesAction
         return $response
             ->withBody($stream)
             ->withHeader('Content-Type', 'application/zip')
-            ->withHeader('Content-Disposition', "attachment; filename=\"prijate-isdoc-{$month}.zip\"")
+            ->withHeader('Content-Disposition', "attachment; filename=\"prijate-isdoc-{$period->label}.zip\"")
             ->withHeader('Content-Length', (string) $size)
             ->withHeader('Cache-Control', 'no-store')
             ->withHeader('X-Export-Warnings', count($errors) > 0 ? (string) count($errors) : '0');
     }
 
     /**
-     * Bulk Pohoda dataPack — jeden XML s `<dataPackItem>` per faktura.
-     *
-     * Strategy: vyrobíme jednoduchý dataPack wrapper kolem N invoice XML.
+     * Bulk Pohoda dataPack — jeden `<dat:dataPack>` s jednou `<dat:dataPackItem>` per
+     * faktura. Celý balíček staví `PohodaXmlExporter::buildXml()` JEDNÍM voláním nad
+     * polem faktur (žádné string-wrappování → žádný zanořený dataPack uvnitř položky).
      *
      * @param list<array<string,mixed>> $rows
      */
-    private function exportPohodaDataPack(Response $response, Request $request, array $rows, string $month, int $supplierId): Response
+    private function exportPohodaDataPack(Response $response, Request $request, array $rows, ExportPeriod $period, int $supplierId): Response
     {
-        $ids = (string) bin2hex(random_bytes(4));
-        $packId = "PI-{$month}-{$ids}";
+        $ids = array_map(static fn ($r): int => (int) $r['id'], $rows);
+        $result = $this->exporter->toPohodaDataPack($ids, $supplierId);
 
-        $items = [];
-        $errors = [];
-        $itemSeq = 0;
-        foreach ($rows as $r) {
-            try {
-                $xml = $this->exporter->toPohodaXml((int) $r['id'], $supplierId);
-            } catch (\Throwable $e) {
-                $errors[] = "{$r['varsymbol']} — " . $e->getMessage();
-                continue;
-            }
-            // Extract inner `<pur:purchase>` element from individual XML — pragmatic
-            // string-level extraction (full DOM parse je overkill pro PoC).
-            $itemSeq++;
-            $items[] = [
-                'id'   => $itemSeq,
-                'vs'   => (string) ($r['varsymbol'] ?? ('id-' . $r['id'])),
-                'xml'  => $xml,
-            ];
-        }
-
-        if (empty($items)) {
+        if ($result['included'] === 0) {
             return Json::error($response, 'no_invoices_processed',
-                'Nepodařilo se vyexportovat žádnou fakturu.', 500, ['errors' => $errors]);
+                'Nepodařilo se vyexportovat žádnou fakturu.', 500, ['errors' => $result['errors']]);
         }
-
-        // Wrap do dataPack — jednoduchý XML string concat. Funguje pro Pohoda 2.x.
-        $dataPack = '<?xml version="1.0" encoding="utf-8"?>' . "\n";
-        $dataPack .= '<dat:dataPack version="2.0"';
-        $dataPack .= ' id="' . htmlspecialchars($packId, ENT_QUOTES | ENT_XML1) . '"';
-        $dataPack .= ' ico="" application="MyInvoice.cz"';
-        $dataPack .= ' note="Bulk export přijatých za ' . htmlspecialchars($month, ENT_QUOTES | ENT_XML1) . '"';
-        $dataPack .= ' xmlns:dat="http://www.stormware.cz/schema/version_2/data.xsd"';
-        $dataPack .= ' xmlns:pur="http://www.stormware.cz/schema/version_2/purchase.xsd"';
-        $dataPack .= ' xmlns:typ="http://www.stormware.cz/schema/version_2/type.xsd">' . "\n";
-        foreach ($items as $it) {
-            // Pohoda XSD vyžaduje striktně alfanumerický id (varsymbol může obsahovat
-            // libovolné znaky z user inputu — sanitize na [A-Za-z0-9._-] before embedding).
-            $safeVs = preg_replace('/[^A-Za-z0-9._-]/', '_', (string) $it['vs']) ?: 'invoice';
-            $dataPack .= '  <dat:dataPackItem version="2.0" id="' . $it['id'] . '_' . $safeVs . '">' . "\n";
-            // Strip XML declaration z individual XML (jen content)
-            $inner = preg_replace('/^<\?xml[^?]*\?>\s*/', '', $it['xml']) ?? $it['xml'];
-            $dataPack .= '    ' . $inner . "\n";
-            $dataPack .= '  </dat:dataPackItem>' . "\n";
-        }
-        $dataPack .= '</dat:dataPack>' . "\n";
 
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $this->logger->log('purchase_invoices.exported', $user['id'] ?? null, null, null, [
-            'format' => 'pohoda-datapack', 'month' => $month, 'included' => count($items),
+            'format' => 'pohoda-datapack',
+            'period' => $period->label,
+            'period_type' => $period->type,
+            'month' => $period->month,
+            'quarter' => $period->quarter,
+            'date_from' => $period->dateFrom,
+            'date_to_exclusive' => $period->dateToExclusive,
+            'included' => $result['included'],
         ], $this->ipMatcher->clientIpFromRequest($request->getServerParams()), $request->getHeaderLine('User-Agent'));
 
-        $response->getBody()->write($dataPack);
+        $response->getBody()->write($result['xml']);
         return $response
             ->withHeader('Content-Type', 'application/xml; charset=utf-8')
-            ->withHeader('Content-Disposition', "attachment; filename=\"prijate-pohoda-{$month}.xml\"")
+            ->withHeader('Content-Disposition', "attachment; filename=\"prijate-pohoda-{$period->label}.xml\"")
             ->withHeader('Cache-Control', 'no-store')
-            ->withHeader('X-Export-Warnings', count($errors) > 0 ? (string) count($errors) : '0');
+            ->withHeader('X-Export-Warnings', count($result['errors']) > 0 ? (string) count($result['errors']) : '0');
     }
 }

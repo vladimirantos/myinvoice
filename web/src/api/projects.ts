@@ -1,10 +1,14 @@
 import { api } from './client'
 import type { ListResponse } from './clients'
 
+export type ProjectEmailUsage = 'documents' | 'reminders' | 'approvals'
+
 export interface BillingEmail {
   position: 1 | 2 | 3
   email: string
   label?: string | null
+  /** Typy zpráv, pro které se e-mail použije (#86); null = všechny (default). */
+  usages?: ProjectEmailUsage[] | null
 }
 
 export interface Project {
@@ -31,6 +35,8 @@ export interface Project {
   client_company_name?: string
   client_main_email?: string
   billing_emails: BillingEmail[]
+  /** Kombinace e-mailů zakázky s kontakty klienta (#86): auto = dosavadní per-typ chování. */
+  billing_emails_mode?: 'auto' | 'append' | 'replace'
   created_at?: string
   updated_at?: string
   // Cache stats z project_revenue_cache (per p.currency)
@@ -60,6 +66,7 @@ export interface ProjectPayload {
   note?: string | null
   default_revenue_category_id?: number | null
   billing_emails: BillingEmail[]
+  billing_emails_mode?: 'auto' | 'append' | 'replace'
 }
 
 export const projectsApi = {

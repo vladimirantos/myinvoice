@@ -37,11 +37,17 @@
   --color-accent-100:  #D7E8F6;
   --color-accent-500:  #5BA8E0;
   --color-accent-600:  #3F89C5;
+  /* Teal (modrozelená) — stav „Odesláno": zelená rodina (ladí se zelenou ikonou
+     e-mailu), ale odlišitelná od zelené „Zaplaceno" a od modrého accentu. */
+  --color-teal-50:     #E2F3F4;
+  --color-teal-500:    #4AA9AE;
+  --color-teal-600:    #2D8A91;
 
   /* ─── Semantic (pastel) ─── */
   --color-success-50:  #ECF6F0;
   --color-success-500: #4CAF7A;   /* soft sage */
-  --color-success-600: #3B9665;
+  --color-success-600: #3B9665;   /* primary „go/potvrdit" button (Vystavit, Zaplaceno…) */
+  --color-success-700: #2E7B53;   /* hover plného success tlačítka */
   --color-warning-50:  #FDF6E9;
   --color-warning-500: #E8A547;   /* soft amber */
   --color-warning-600: #C68A30;
@@ -111,7 +117,24 @@
   --color-success-50: #16261D;
   --color-warning-50: #2A2113;
   --color-danger-50:  #2C1717;
+  /* Zelená (Upravit — outline: border + text + ikona). V dark mírně svítivější
+     pro čitelnost na tmavém podkladu, ale ne neonová. */
+  --color-success-500: #56A98A;   /* border Upravit */
+  --color-success-600: #46A074;   /* text + ikona Upravit (a ostatní success text) */
+  --color-success-700: #2A6446;   /* hover bg tint */
   --color-accent-50:  #122231;
+  /* accent-100 (soft pill bg — badge Proforma) — bez tohoto override by zůstal
+     světlý #D7E8F6 a v dark módu zářil. Laděno k ostatním -50 stavům. */
+  --color-accent-100: #16344C;
+  --color-teal-50:    #102A2D;   /* stav „Odesláno" — tmavý tint */
+  /* Částečné úhrady (#89): badge „Částečně uhrazeno" (amber) a „Přeplaceno"
+     (purple) — bez override by světlé -50 tinty v dark módu zářily. Text -600/-700
+     naopak zesvětlit, default Tailwind hodnoty jsou na tmavém nečitelné. */
+  --color-amber-50:   #2B2113;
+  --color-amber-600:  #D99C3F;
+  --color-amber-700:  #E2AE5C;
+  --color-purple-50:  #241A33;
+  --color-purple-700: #C2A6EC;
 }
 
 html, body {

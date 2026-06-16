@@ -10,10 +10,12 @@ use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\WorkReportRepository;
+use MyInvoice\Service\Bank\VariableSymbolNormalizer;
 use MyInvoice\Service\Branding\AccentColor;
 use MyInvoice\Service\Export\IsdocExporter;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
 use MyInvoice\Service\Qr\QrPaymentGenerator;
+use MyInvoice\Service\Signing\Pdf\PdfSigningService;
 use Twig\Environment;
 use Twig\Loader\FilesystemLoader;
 
@@ -28,6 +30,8 @@ use Twig\Loader\FilesystemLoader;
  */
 final class InvoicePdfRenderer
 {
+    use SignsPdf;
+
     private ?Environment $twig = null;
 
     public function __construct(
@@ -39,6 +43,7 @@ final class InvoicePdfRenderer
         private readonly SnapshotBuilder $snapshots,
         private readonly PdfArchiveService $archive,
         private readonly IsdocExporter $isdoc,
+        private readonly PdfSigningService $pdfSigning,
     ) {}
 
     /**
@@ -46,7 +51,7 @@ final class InvoicePdfRenderer
      *
      * @return string  absolutní cesta k vygenerovanému PDF
      */
-    public function render(int $invoiceId, bool $forceRegenerate = false): string
+    public function render(int $invoiceId, bool $forceRegenerate = false, ?int $userId = null): string
     {
         $invoice = $this->repo->find($invoiceId);
         if ($invoice === null) {
@@ -54,6 +59,12 @@ final class InvoicePdfRenderer
         }
 
         $cachedPath = $this->cachePath($invoice);
+        $supplierData = $this->getSupplierData((int) ($invoice['supplier_id'] ?? 0));
+        $signatureCacheDependsOnUser = $this->pdfSigning->outputDependsOnUserProfile(
+            $supplierData,
+            'invoice',
+            $invoiceId,
+        );
 
         // Cache je validní jen když je novější než šablona, CSS a kód renderu
         $tplMtime = max(
@@ -64,7 +75,7 @@ final class InvoicePdfRenderer
         $isFresh = static fn (string $p): bool =>
             is_file($p) && (@filemtime($p) ?: 0) >= $tplMtime;
 
-        if (!$forceRegenerate && $invoice['pdf_path'] && $isFresh($invoice['pdf_path'])) {
+        if (!$forceRegenerate && !$signatureCacheDependsOnUser && $invoice['pdf_path'] && $isFresh($invoice['pdf_path'])) {
             return $invoice['pdf_path'];
         }
         // cachePath fallback je orphan-recovery (pdf_path je null, ale soubor leží na
@@ -72,7 +83,7 @@ final class InvoicePdfRenderer
         // by invalidate() s uzamčeným souborem (Windows: PDF otevřené v prohlížeči →
         // rename a unlink selžou) skončila s pdf_path=NULL ale původní soubor zůstal
         // na disku, a tahle větev by ho zde znovu pickla → stale PDF.
-        if (!$forceRegenerate && !empty($invoice['pdf_generated_at']) && $isFresh($cachedPath)) {
+        if (!$forceRegenerate && !$signatureCacheDependsOnUser && !empty($invoice['pdf_generated_at']) && $isFresh($cachedPath)) {
             $this->updatePdfPath($invoiceId, $cachedPath);
             return $cachedPath;
         }
@@ -117,8 +128,8 @@ final class InvoicePdfRenderer
             'margin_left'       => 15,
             'margin_right'      => 15,
             'tempDir'           => $tmpDir,
-            'default_font'      => 'dejavusans',
             'autoPageBreak'     => true,
+            ...MpdfFontConfig::options(),
         ]);
         // PDF metadata — bez Title/Author, aby Chrome viewer nezobrazoval text nad PDF.
         $mpdf->SetTitle('');
@@ -150,6 +161,17 @@ final class InvoicePdfRenderer
         // (když je starý PDF otevřený v Chrome PDF viewer, přepis přímo by selhal).
         $tmpPath = $cachedPath . '.new';
         $mpdf->Output($tmpPath, \Mpdf\Output\Destination::FILE);
+
+        // Podpis PDF (PAdES) — má-li dodavatel zapnuto; měkký fallback při chybě.
+        $tmpPath = $this->signPdfIfEnabled(
+            $tmpPath,
+            $supplierData,
+            $this->pdfSigning,
+            'invoice',
+            $invoiceId,
+            $userId,
+        );
+
         if (is_file($cachedPath)) {
             @unlink($cachedPath); // pokud locked, fail silently
         }
@@ -204,7 +226,11 @@ final class InvoicePdfRenderer
         //     → drafty bez VS dostanou QR taky (preview pro klienta), remittance fallback
         //   Skip pro zaplacené faktury a pro non-bank-transfer payment_method
         $qrUri = null;
-        $hasAmount = (float) $invoice['amount_to_pay'] > 0;
+        // Částečné úhrady (#89): QR i výzva k platbě znějí na ZBÝVAJÍCÍ částku
+        // (amount_to_pay − paid_total) — znovu stažené/poslané PDF po částečné
+        // úhradě nesmí chtít celou částku. Cache se při změně plateb invaliduje.
+        $remaining = round((float) $invoice['amount_to_pay'] - (float) ($invoice['paid_total'] ?? 0), 2);
+        $hasAmount = $remaining > 0;
         $isCzk = ((string) $invoice['currency']) === 'CZK';
         $hasVs = !empty($invoice['varsymbol']);
         $isPaid = ($invoice['status'] ?? '') === 'paid';
@@ -213,7 +239,7 @@ final class InvoicePdfRenderer
         if ($hasAmount && $bankData !== null && (!$isCzk || $hasVs) && !$isPaid && $isBankTransfer) {
             $qrUri = $this->qr->generate(
                 (string) $invoice['currency'],
-                (float) $invoice['amount_to_pay'],
+                $remaining,
                 (string) ($invoice['varsymbol'] ?? ''),
                 $bankData,
                 (string) ($supplierData['display_name'] ?? $supplierData['company_name'] ?? 'MyInvoice'),
@@ -243,6 +269,10 @@ final class InvoicePdfRenderer
             'client'            => $clientData,
             'bank'              => $bankData,
             'qr_data_uri'       => $qrUri,
+            // Platební VS = jen číslice (max 10) — `varsymbol` může nést pomlčku z čísla
+            // dokladu, kterou banka nepřijme. Velký titulek dokladu zůstává s pomlčkou,
+            // ale do platebního řádku tiskneme validní VS (shodné s QR a párováním).
+            'payment_varsymbol' => VariableSymbolNormalizer::forPayment((string) ($invoice['varsymbol'] ?? '')),
             'is_paid'           => $isPaid,
             'payment_method'    => $paymentMethod,
             'locale'            => $locale,
@@ -398,19 +428,25 @@ final class InvoicePdfRenderer
 
     private function docTypeLabel(array $invoice, string $locale, array $supplier = []): string
     {
-        $isVatPayer = (bool) ($supplier['is_vat_payer'] ?? true);
+        // Identifikovaná osoba (§ 6g–6l, #94): její RC faktura do EU JE daňový
+        // doklad (povinnost ho vystavit do 15 dnů od konce měsíce, § 28) —
+        // label „daňový doklad" si zaslouží stejně jako plátcovská.
+        $isVatPayer = (bool) ($supplier['is_vat_payer'] ?? true)
+            || ((bool) ($supplier['is_identified'] ?? false) && !empty($invoice['reverse_charge']));
         $labels = [
             'cs' => [
                 'invoice'      => $isVatPayer ? 'Faktura — daňový doklad' : 'Faktura',
                 'proforma'     => 'Zálohová faktura',
                 'credit_note'  => $isVatPayer ? 'Opravný daňový doklad' : 'Opravná faktura',
                 'cancellation' => 'Storno (interní)',
+                'tax_document' => 'Daňový doklad k přijaté platbě',
             ],
             'en' => [
                 'invoice'      => $isVatPayer ? 'Invoice — Tax document' : 'Invoice',
                 'proforma'     => 'Proforma invoice',
                 'credit_note'  => $isVatPayer ? 'Credit note — Tax adjustment' : 'Credit note',
                 'cancellation' => 'Cancellation (internal)',
+                'tax_document' => 'Tax document for payment received',
             ],
         ];
         return $labels[$locale][$invoice['invoice_type']] ?? $labels['cs'][$invoice['invoice_type']] ?? '';
@@ -423,6 +459,7 @@ final class InvoicePdfRenderer
             'proforma'     => 'Zálohová faktura',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
+            'tax_document' => 'Daňový doklad k platbě',
             default        => 'Faktura',
         };
         return "$t $vs";
@@ -539,6 +576,34 @@ final class InvoicePdfRenderer
             || !empty($invoice['bank_snapshot']);
         if (!$hasAny) return $invoice;
 
+        return $this->writeSnapshots($invoice);
+    }
+
+    /**
+     * Přepíše snapshoty (supplier/client/bank) z aktuálních live dat — voláno při
+     * admin force-editu VYSTAVENÉ faktury, aby se opravené údaje stran (adresa/IČO/
+     * název odběratele, banka) promítly do nově generovaného PDF.
+     *
+     * Narozdíl od refreshSnapshots() (regenerate cesta, jen drafty) tahle metoda
+     * ZÁMĚRNĚ přepíše snapshot i u issued/sent/paid faktury — je to vědomá oprava
+     * dokladu, kterou UI uživateli avizuje („Změny přepíšou snapshoty"). Auditní
+     * stopu (kdo/kdy/co) zajišťuje volající přes ActivityLogger.
+     */
+    public function rebuildSnapshots(int $invoiceId): void
+    {
+        $invoice = $this->repo->find($invoiceId);
+        if ($invoice === null) return;
+        $this->writeSnapshots($invoice);
+    }
+
+    /**
+     * Postaví snapshoty z live dat a uloží do invoices. Sdílené jádro pro
+     * refreshSnapshots() (drafty) i rebuildSnapshots() (force-edit vystavené).
+     *
+     * @return array  invoice array s aktualizovanými snapshoty (in-memory)
+     */
+    private function writeSnapshots(array $invoice): array
+    {
         try {
             $built = $this->snapshots->build(
                 (int) $invoice['client_id'],
@@ -632,6 +697,7 @@ final class InvoicePdfRenderer
             'proforma'     => 'Proforma',
             'credit_note'  => 'Dobropis',
             'cancellation' => 'Storno',
+            'tax_document' => 'DanovyDoklad',
             default        => 'Faktura',
         };
         return "$dir/$type-$vs.pdf";

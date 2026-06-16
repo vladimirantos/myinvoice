@@ -27,6 +27,8 @@ const props = defineProps<{
   months: Array<{ ym: string; total: number }>
   prevYear: Array<{ ym: string; total: number }>
   currency: string
+  /** Povolit záporné hodnoty v kumulaci (zisk může být ztrátový). Default false (tržby ≥ 0). */
+  allowNegative?: boolean
 }>()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
@@ -43,6 +45,8 @@ const seriesData = computed(() => {
   const prevCum: number[] = []
   let tAcc = 0
   let pAcc = 0
+  // U tržeb klampujeme záporné na 0 (tržby nikdy nejsou záporné); u zisku ne (ztráta snižuje kumulaci).
+  const clamp = (v: number) => props.allowNegative ? v : Math.max(0, v)
   for (let m = 1; m <= 12; m++) {
     const ymThis = `${thisYear}-${String(m).padStart(2, '0')}`
     const ymPrev = `${prevYear}-${String(m).padStart(2, '0')}`
@@ -50,8 +54,8 @@ const seriesData = computed(() => {
               ?? props.prevYear.find(x => x.ym === ymThis)?.total ?? 0
     const prevVal = props.months.find(x => x.ym === ymPrev)?.total
               ?? props.prevYear.find(x => x.ym === ymPrev)?.total ?? 0
-    tAcc += Math.max(0, thisVal)
-    pAcc += Math.max(0, prevVal)
+    tAcc += clamp(thisVal)
+    pAcc += clamp(prevVal)
     labels.push(String(m).padStart(2, '0'))
     // Future months pro aktuální rok → null (nezobrazí se).
     thisCum.push(m > now.getMonth() + 1 ? NaN : tAcc)
@@ -120,7 +124,7 @@ function build() {
       },
       scales: {
         y: {
-          beginAtZero: true,
+          beginAtZero: !props.allowNegative,
           ticks: { color: colors.value.tick, font: { size: 11 }, callback: (v) => formatTick(Number(v)) },
           grid: { color: colors.value.grid },
         },

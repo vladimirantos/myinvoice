@@ -3,19 +3,21 @@ import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vu
 import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { clientsApi, type Client } from '@/api/clients'
+import { clientsApi, TAX_NUMBER_LABELS, type Client, type BankLookupResult, type ViesLookupResult } from '@/api/clients'
 import { invoicesApi, type InvoiceListItem } from '@/api/invoices'
 import { purchaseInvoicesApi, type PurchaseInvoice } from '@/api/purchaseInvoices'
 import { recurringApi, type RecurringTemplate } from '@/api/recurring'
-import { formatMoney, formatDate, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass } from '@/composables/useFormat'
+import { formatMoney, formatDate, statusLabel, typeLabel, statusBadgeClass, isOverdue, invoiceRowClass, taxDateClass } from '@/composables/useFormat'
 import MonthlyRevenueChart from '@/components/charts/MonthlyRevenueChart.vue'
 import TopProjectsBarChart from '@/components/charts/TopProjectsBarChart.vue'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
+import SendWorkReportLinkModal from '@/components/modals/SendWorkReportLinkModal.vue'
 
 const { t } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
+const showWrLinkModal = ref(false)
 
 const route = useRoute()
 const router = useRouter()
@@ -31,6 +33,43 @@ const invoicesPages = ref(1)
 const recurringTemplates = ref<RecurringTemplate[]>([])
 const purchaseInvoices = ref<PurchaseInvoice[]>([])
 const purchaseInvoicesLoading = ref(false)
+
+// Detaily plátce DPH — CZ DIČ jde do registru plátců DPH (CRPDPH/MFČR: účty + nespolehlivost),
+// zahraniční EU DIČ (SK…) do VIES; CRPDPH je jen český registr a cizí DIČ by vždy
+// vrátil nepravdivé „není evidován" (#120).
+const vatInfoOpen = ref(false)
+const vatInfoLoading = ref(false)
+const vatInfo = ref<BankLookupResult | null>(null)
+const vatInfoVies = ref<ViesLookupResult | null>(null)
+const vatInfoError = ref('')
+
+async function loadVatPayerDetails() {
+  const raw = (client.value?.dic || '').toUpperCase().replace(/[\s-]/g, '')
+  if (!raw) return
+  const prefix = raw.match(/^([A-Z]{2})\d/)?.[1] ?? null
+  vatInfoOpen.value = true
+  vatInfoLoading.value = true
+  vatInfoError.value = ''
+  vatInfo.value = null
+  vatInfoVies.value = null
+  try {
+    if (prefix && prefix !== 'CZ') {
+      vatInfoVies.value = await clientsApi.lookupVies(raw)
+    } else {
+      vatInfo.value = await clientsApi.lookupBank(raw.replace(/\D/g, ''))
+    }
+  } catch (e: any) {
+    vatInfoError.value = e?.response?.data?.error?.message || t('client.vat_payer_details_failed')
+  } finally {
+    vatInfoLoading.value = false
+  }
+}
+
+// Národní daňové číslo + label dle země (#120); u SK je `dic` = IČ DPH.
+const taxNumberLabel = computed(() =>
+  client.value ? (TAX_NUMBER_LABELS[client.value.country_iso2] ?? null) : null
+)
+const dicIsSk = computed(() => (client.value?.dic || '').toUpperCase().startsWith('SK'))
 
 // Aggregace přijatých faktur per měsíc / rok (paralel se statistikami vystavených).
 // Server zatím nevrací aggregated dataset, takže computované client-side z purchaseInvoices.
@@ -302,25 +341,22 @@ async function deleteClient() {
         <h1 class="text-2xl font-semibold mt-1">{{ client.company_name }}</h1>
         <div class="text-sm text-neutral-500 mt-1 flex flex-wrap items-center gap-x-2">
           <span v-if="client.ic"><span>{{ t('common.ic') }}</span> <span class="font-mono">{{ client.ic }}</span></span>
-          <span v-if="client.dic">· <span>{{ t('common.dic') }}</span> <span class="font-mono">{{ client.dic }}</span></span>
+          <!-- Národní daňové číslo (#120): SK DIČ / Steuernummer / NIP / Adószám; u SK je `dic` = IČ DPH -->
+          <span v-if="client.tax_number">· <span>{{ taxNumberLabel ?? t('common.tax_number') }}</span> <span class="font-mono">{{ client.tax_number }}</span></span>
+          <span v-if="client.dic">· <span>{{ dicIsSk ? t('common.ic_dph') : t('common.dic') }}</span> <span class="font-mono">{{ client.dic }}</span></span>
           <span v-if="client.archived_at" class="px-2 py-0.5 text-xs bg-neutral-100 text-neutral-600 rounded">{{ t('common.archived') }}</span>
         </div>
       </div>
       <div class="flex flex-wrap gap-2 md:justify-end">
         <RouterLink v-if="auth.canWrite" :to="`/clients/${client.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
           {{ t('common.edit') }}
         </RouterLink>
-        <button v-if="!client.archived_at && auth.canWrite" @click="archive"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 1 1 0-4h14a2 2 0 1 1 0 4M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/></svg>
-          {{ t('common.archive') }}
-        </button>
-        <button v-else-if="auth.canWrite" @click="unarchive"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500/50 rounded-md text-success-600 hover:bg-success-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
-          {{ t('common.restore') }}
+        <button v-if="client.dic" @click="loadVatPayerDetails" :disabled="vatInfoLoading"
+          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5 disabled:opacity-50">
+          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+          {{ vatInfoLoading ? t('common.loading') : t('client.vat_payer_details') }}
         </button>
         <button v-if="(canDelete) && auth.canWrite" @click="deleteClient"
           class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 rounded-md text-danger-500 hover:bg-danger-50 inline-flex items-center gap-1.5">
@@ -328,6 +364,50 @@ async function deleteClient() {
           {{ t('common.delete') }}
         </button>
       </div>
+    </div>
+
+    <!-- Detaily plátce DPH (na vyžádání z registru plátců DPH / MFČR) -->
+    <div v-if="vatInfoOpen" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('client.vat_payer_details') }}</h3>
+        <button @click="vatInfoOpen = false" class="cursor-pointer text-neutral-400 hover:text-neutral-700 text-sm leading-none">✕</button>
+      </div>
+      <div v-if="vatInfoLoading" class="text-sm text-neutral-500">{{ t('common.loading') }}</div>
+      <div v-else-if="vatInfoError" class="text-sm text-danger-500">{{ vatInfoError }}</div>
+      <!-- Zahraniční EU DIČ → výsledek z VIES (#120) -->
+      <template v-else-if="vatInfoVies">
+        <div v-if="vatInfoVies.source === 'error'" class="text-sm text-warning-600">{{ t('client.vat_payer_vies_unavailable') }}</div>
+        <div v-else-if="!vatInfoVies.valid" class="text-sm text-neutral-600">{{ t('client.vat_payer_vies_not_registered') }}</div>
+        <div v-else class="space-y-2 text-sm">
+          <div>
+            <span class="px-2 py-0.5 rounded bg-success-50 text-success-600 font-medium">{{ t('client.vat_payer_vies_registered') }}</span>
+          </div>
+          <div v-if="vatInfoVies.vat_number" class="font-mono text-neutral-900">{{ vatInfoVies.vat_number }}</div>
+          <div v-if="vatInfoVies.name" class="text-neutral-900">{{ vatInfoVies.name }}</div>
+          <div v-if="vatInfoVies.address" class="text-neutral-600 whitespace-pre-line">{{ vatInfoVies.address }}</div>
+          <p class="text-xs text-neutral-400">{{ t('client.vat_payer_vies_source') }}</p>
+        </div>
+      </template>
+      <template v-else-if="vatInfo">
+        <div v-if="vatInfo.source === 'error'" class="text-sm text-warning-600">{{ t('client.vat_payer_unavailable') }}</div>
+        <div v-else-if="!vatInfo.found" class="text-sm text-neutral-600">{{ t('client.vat_payer_not_registered') }}</div>
+        <div v-else class="space-y-3 text-sm">
+          <div class="flex items-center gap-2">
+            <span class="text-neutral-500">{{ t('client.vat_payer_reliability') }}:</span>
+            <span v-if="vatInfo.unreliable === true" class="px-2 py-0.5 rounded bg-danger-50 text-danger-600 font-medium">{{ t('client.vat_payer_unreliable') }}</span>
+            <span v-else-if="vatInfo.unreliable === false" class="px-2 py-0.5 rounded bg-success-50 text-success-600 font-medium">{{ t('client.vat_payer_reliable') }}</span>
+            <span v-else class="px-2 py-0.5 rounded bg-neutral-100 text-neutral-600">{{ t('client.vat_payer_unknown') }}</span>
+          </div>
+          <div>
+            <div class="text-neutral-500 mb-1">{{ t('client.vat_payer_accounts') }}:</div>
+            <ul v-if="vatInfo.accounts.length" class="space-y-1">
+              <li v-for="(a, i) in vatInfo.accounts" :key="i" class="font-mono text-neutral-900">{{ a.display }}</li>
+            </ul>
+            <div v-else class="text-neutral-500">{{ t('client.vat_payer_no_accounts') }}</div>
+          </div>
+          <p class="text-xs text-neutral-400">{{ t('client.vat_payer_source') }}</p>
+        </div>
+      </template>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -344,6 +424,28 @@ async function deleteClient() {
             <dd class="text-neutral-900 font-mono">{{ client.phone }}</dd>
           </div>
         </dl>
+        <!-- E-mailové kontakty dle účelu (#86) -->
+        <div v-if="client.email_contacts?.length" class="mt-3 pt-3 border-t border-neutral-200">
+          <div class="text-xs text-neutral-500 mb-2">{{ t('client.email_contacts.title') }}</div>
+          <div class="space-y-2">
+            <div v-for="ec in client.email_contacts" :key="ec.id ?? ec.email"
+              :class="['text-sm', ec.is_active ? '' : 'opacity-50']">
+              <div class="text-neutral-900 break-all">
+                {{ ec.email }}
+                <span v-if="ec.contact_name || ec.label" class="text-neutral-500 text-xs">
+                  — {{ [ec.contact_name, ec.label].filter(Boolean).join(', ') }}</span>
+                <span v-if="!ec.is_active" class="text-xs text-neutral-400">({{ t('client.email_contacts.inactive') }})</span>
+              </div>
+              <div class="flex flex-wrap gap-1 mt-0.5">
+                <span v-for="u in ec.usages" :key="u.usage"
+                  class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-primary-50 border border-primary-200 text-primary-700 text-[11px]">
+                  {{ t(`client.email_contacts.usage.${u.usage}`) }}<template v-if="u.recipient !== 'to'"> · {{ u.recipient.toUpperCase() }}</template>
+                </span>
+                <span v-if="!ec.usages.length" class="text-[11px] text-neutral-400">{{ t('client.email_contacts.no_usage') }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Adresa -->
@@ -584,6 +686,7 @@ async function deleteClient() {
             <th class="text-left px-4 py-2.5 font-medium">{{ t('invoice.varsymbol') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('invoice.type') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('invoice.issue_date') }}</th>
+            <th class="text-left px-4 py-2.5 font-medium">{{ t('invoice.tax_date') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('invoice.due_date') }}</th>
             <th class="text-right px-4 py-2.5 font-medium">{{ t('invoice.amount_to_pay') }}</th>
             <th class="text-center px-4 py-2.5 font-medium">{{ t('invoice.status_label') }}</th>
@@ -596,6 +699,7 @@ async function deleteClient() {
             <td class="px-4 py-2.5 font-mono">{{ inv.varsymbol || `#${inv.id}` }}</td>
             <td class="px-4 py-2.5 text-neutral-600">{{ typeLabel(inv.invoice_type) }}</td>
             <td class="px-4 py-2.5 text-neutral-600">{{ formatDate(inv.issue_date) }}</td>
+            <td class="px-4 py-2.5" :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ inv.tax_date ? formatDate(inv.tax_date) : '—' }}</td>
             <td class="px-4 py-2.5">
               <span :class="isOverdue(inv.due_date, inv.status) ? 'text-danger-600 font-medium' : 'text-neutral-600'">
                 {{ formatDate(inv.due_date) }}
@@ -635,6 +739,10 @@ async function deleteClient() {
               </span>
             </span>
           </div>
+          <div v-if="inv.tax_date" class="mt-0.5 text-xs">
+            <span class="text-neutral-400">{{ t('invoice.tax_date') }}:</span>
+            <span :class="taxDateClass(inv.tax_date, inv.issue_date)">{{ formatDate(inv.tax_date) }}</span>
+          </div>
           <div class="mt-2">
             <span class="text-xs px-2 py-0.5 rounded" :class="statusBadgeClass(inv.status)">
               {{ statusLabel(inv.status) }}
@@ -671,6 +779,7 @@ async function deleteClient() {
           <tr>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('purchase_invoice.fields.vendor_invoice_number') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('purchase_invoice.fields.issue_date') }}</th>
+            <th class="text-left px-4 py-2.5 font-medium">{{ t('purchase_invoice.fields.tax_date') }}</th>
             <th class="text-left px-4 py-2.5 font-medium">{{ t('purchase_invoice.fields.due_date') }}</th>
             <th class="text-right px-4 py-2.5 font-medium">{{ t('purchase_invoice.totals.with_vat') }}</th>
             <th class="text-center px-4 py-2.5 font-medium">{{ t('invoice.status_label') }}</th>
@@ -681,6 +790,7 @@ async function deleteClient() {
               @click="router.push(`/purchase-invoices/${pi.id}`)">
             <td class="px-4 py-2.5 font-mono">{{ pi.vendor_invoice_number || `#${pi.id}` }}</td>
             <td class="px-4 py-2.5 text-neutral-600">{{ formatDate(pi.issue_date) }}</td>
+            <td class="px-4 py-2.5" :class="taxDateClass(pi.tax_date, pi.issue_date)">{{ pi.tax_date ? formatDate(pi.tax_date) : '—' }}</td>
             <td class="px-4 py-2.5 text-neutral-600">{{ formatDate(pi.due_date) }}</td>
             <td class="px-4 py-2.5 text-right font-mono">{{ formatMoney(pi.total_with_vat, pi.currency || 'CZK') }}</td>
             <td class="px-4 py-2.5 text-center">
@@ -772,5 +882,26 @@ async function deleteClient() {
       </div>
     </div>
     <LinkedDocumentsPanel v-if="client" class="mt-4 block" entity-type="client" :entity-id="client.id" />
+
+    <!-- Spodní lišta — méně časté akce -->
+    <div v-if="auth.canWrite" class="bg-surface border border-neutral-200 rounded-lg shadow-sm px-4 py-3 flex flex-wrap items-center gap-2">
+      <button @click="showWrLinkModal = true"
+        class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
+        <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5M10.172 13.828a4 4 0 010-5.656l3-3a4 4 0 015.656 5.656l-1.5 1.5"/></svg>
+        {{ t('workReportTracking.button') }}
+      </button>
+      <button v-if="!client.archived_at" @click="archive"
+        class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 inline-flex items-center gap-1.5">
+        <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 1 1 0-4h14a2 2 0 1 1 0 4M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/></svg>
+        {{ t('common.archive') }}
+      </button>
+      <button v-else @click="unarchive"
+        class="cursor-pointer px-3 h-9 text-sm border border-success-500/50 rounded-md text-success-600 hover:bg-success-50 inline-flex items-center gap-1.5">
+        <svg class="w-4 h-4 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
+        {{ t('common.restore') }}
+      </button>
+    </div>
+
+    <SendWorkReportLinkModal v-if="client" :open="showWrLinkModal" scope="client" :entity-id="client.id" @close="showWrLinkModal = false" />
   </div>
 </template>

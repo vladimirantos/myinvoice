@@ -21,19 +21,27 @@ samotného skriptu, takže jsou přenositelné mezi `C:\inetpub\wwwroot\…`,
 | `cron-backup-pdf.{cmd,sh}` | ZIP všech PDF (`storage/invoices/` + `storage/work-reports/`) do `storage/backup/{dbname}-pdf-YYYY-MM-DD.zip`, stejná retention jako `cron-backup` |
 | `cron-backup-documents.{cmd,sh}` | ZIP celé sekce Dokumenty (`storage/documents/`, všechny typy; vynechává `_thumbs`/`_jobs`) do `storage/backup/{dbname}-documents-YYYY-MM-DD.zip`, stejná retention; oddělené od `cron-backup-pdf` (ten Dokumenty nezahrnuje) |
 | `cron-bank-scan.{cmd,sh}` | Auto-import nových GPC výpisů z `private/bank-incoming/` + matching plateb na faktury |
+| `cron-bank-email-notices.{cmd,sh}` | IMAP polling bankovních e-mailových avíz, parsování plateb a matching na faktury (konfigurace v **Admin → Bankovní účty**) |
 | `cron-send-reminders.{cmd,sh}` | Odeslání upomínkových e-mailů na faktury po splatnosti (`--days=N`, `--cooldown=N`, `--dry-run`) |
 | `cron-send-approval-reminders.{cmd,sh}` | Upomínky zákazníkům, kteří neschválili výkaz víceprací (`--days=N`, `--dry-run`) |
 | `cron-generate-recurring-invoices.{cmd,sh}` | Generování faktur ze šablon pravidelné fakturace; volitelné rovnou vystavení a odeslání klientovi (`--dry-run`) |
 | `cron-version-check.{cmd,sh}` | Denní kontrola GitHub Releases API; cachuje poslední dostupnou verzi + release notes pro **Systém → Aktualizace** |
 
+Všechny tři backup ZIPy (DB, PDF, Dokumenty) lze volitelně šifrovat heslem
+`cron.backup.password` v `cfg.php` (AES-256). Rozbalení pak vyžaduje 7-Zip /
+WinRAR / `unzip -P` — vestavěný Průzkumník Windows AES-256 archivy neotevře.
+Pokud je heslo nastavené a PHP ext-zip AES nepodporuje (libzip < 1.2), záloha
+se záměrně nevytvoří a úloha skončí chybou (vidět v **Systém → Plánované úlohy**).
+
 ### Docker — vývoj v kontejnerech
 
 | Skript | Co dělá |
 |---|---|
-| `docker-build.{sh,ps1}` | `docker compose build app` — postaví image (volitelné `--no-cache`, `--pull`) |
-| `docker-install.{sh,ps1}` | First-run setup: vygeneruje `.env` + `cfg.docker.php`, postaví image **z lokálních zdrojů**, `up -d`, počká na DB healthcheck, spustí migrace, vypíše URL setup wizardu |
-| `docker-ghcr.{sh,ps1}` | One-click install **z pre-built image na GHCR** (`ghcr.io/radekhulan/myinvoice:latest`) — žádný local build. Stejně jako install vygeneruje `.env` + `cfg.docker.php`, místo `build` udělá `pull`, pak `up -d` + migrace |
-| `docker-update.{sh,ps1}` | Update běžící instance — auto-detekce: `git pull` + rebuild (source mode) **nebo** `pull` z GHCR (registry mode), pak `up -d` + migrace |
+| `docker-build.{sh,ps1}` | `docker compose build app` — postaví image (default **alpine/nginx** z `Dockerfile.alpine`; volitelné `--no-cache`, `--pull`) |
+| `docker-install.{sh,ps1}` | First-run setup: vygeneruje `.env` + `cfg.docker.php`, **preferuje GHCR pull** (lokální build jen s `--build` / `MYINVOICE_INSTALL_MODE=source`), `up -d`, počká na DB healthcheck, spustí migrace, vypíše URL setup wizardu |
+| `docker-ghcr.{sh,ps1}` | One-click install **z pre-built image na GHCR** (`ghcr.io/radekhulan/myinvoice:latest` = alpine/nginx) — žádný local build. Stejně jako install vygeneruje `.env` + `cfg.docker.php`, místo `build` udělá `pull`, pak `up -d` + migrace |
+| `docker-update.{sh,ps1}` | Update běžící instance — **detekuje režim z image běžícího kontejneru**: registry (`ghcr.io/...`) → `pull`, lokální build → `git pull` + rebuild; pak `up -d` + migrace + úklid dangling vrstev. Přebití `MYINVOICE_UPDATE_MODE=registry\|source`. (Existující Debian instalace se přechodem `:latest` na alpine zmigrují samy při příštím updatu — drop-in.) |
+| `docker-prune-images.{sh,ps1}` | Detekuje a maže **obsolete** myinvoice image (nepoužívané kontejnerem ani compose) + dangling vrstvy. `--dry-run` / `-DryRun` jen vypíše. Chrání běžící i compose-referencované image |
 | `docker-update-watcher.{sh,ps1}` | Host-side daemon (systemd unit / Scheduled Task) — sleduje flag soubor `storage/upgrade-requested.json` (zapisuje UI v **Systém → Aktualizace**) a spustí `docker-update`, výsledek do `upgrade-result.json` |
 
 ### Build / deploy / kvalita
@@ -52,6 +60,7 @@ samotného skriptu, takže jsou přenositelné mezi `C:\inetpub\wwwroot\…`,
 | `cron-backup-pdf` | 1× denně | 02:30 (po DB backupu) |
 | `cron-backup-documents` | 1× denně | 02:35 (po PDF backupu) |
 | `cron-bank-scan` | každých 15–30 minut | `*/30 * * * *` |
+| `cron-bank-email-notices` | každých 30 minut | `*/30 * * * *` |
 | `cron-send-reminders` | 1× denně (pracovní dny) | 09:00, Po–Pá |
 | `cron-send-approval-reminders` | 1× denně (pracovní dny) | 09:15, Po–Pá |
 | `cron-generate-recurring-invoices` | 1× denně | 06:30 |
@@ -68,6 +77,7 @@ schtasks /create /tn "MyInvoice Backup"    /tr "C:\inetpub\wwwroot\myinvoice.cz\
 schtasks /create /tn "MyInvoice BackupPDF" /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-backup-pdf.cmd"     /sc daily /st 02:30 /ru SYSTEM
 schtasks /create /tn "MyInvoice BackupDocs" /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-backup-documents.cmd" /sc daily /st 02:35 /ru SYSTEM
 schtasks /create /tn "MyInvoice BankScan"  /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-bank-scan.cmd"      /sc minute /mo 30 /ru SYSTEM
+schtasks /create /tn "MyInvoice BankEmailNotices" /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-bank-email-notices.cmd" /sc minute /mo 30 /ru SYSTEM
 schtasks /create /tn "MyInvoice Reminders" /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-send-reminders.cmd" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:00 /ru SYSTEM
 schtasks /create /tn "MyInvoice ApprovalReminders" /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-send-approval-reminders.cmd" /sc weekly /d MON,TUE,WED,THU,FRI /st 09:15 /ru SYSTEM
 schtasks /create /tn "MyInvoice Recurring"         /tr "C:\inetpub\wwwroot\myinvoice.cz\cmd\cron-generate-recurring-invoices.cmd" /sc daily /st 06:30 /ru SYSTEM
@@ -106,6 +116,7 @@ Edituj `crontab -e` (nebo `/etc/cron.d/myinvoice`):
  30  2  *   *   *    /var/www/myinvoice.cz/cmd/cron-backup-pdf.sh
  35  2  *   *   *    /var/www/myinvoice.cz/cmd/cron-backup-documents.sh
 */30 *  *   *   *    /var/www/myinvoice.cz/cmd/cron-bank-scan.sh
+*/30 *  *   *   *    /var/www/myinvoice.cz/cmd/cron-bank-email-notices.sh
   0  9  *   *   1-5  /var/www/myinvoice.cz/cmd/cron-send-reminders.sh
  15  9  *   *   1-5  /var/www/myinvoice.cz/cmd/cron-send-approval-reminders.sh
  30  6  *   *   *    /var/www/myinvoice.cz/cmd/cron-generate-recurring-invoices.sh
@@ -241,8 +252,14 @@ docker compose exec app php api/bin/migrate.php --status   # cli z hostu
 
 ### Cron uvnitř kontejneru
 
-Apache image nemá `cron`. Cron skripty z `cmd/` spouštěj z hosta přes
-`docker compose exec`:
+Oba image (Debian/Apache i alpine/nginx) mají **vestavěný cron** — crontab se
+build-time generuje z `CronCatalog` (`tools/generateDockerCrontab.php`), takže
+obsahuje všechny úlohy + frekvence z UI **Systém → Plánované úlohy**. Spouští ho
+entrypoint při startu (default `MYINVOICE_ENABLE_CRON=1`; logy v
+`${MYINVOICE_DATA_DIR}/log/cron`). Při více replikách app nastav v jedné běžící
+`MYINVOICE_ENABLE_CRON=0`, jinak by úlohy běžely vícenásobně.
+
+Vypnutí vestavěného cronu a spouštění z hosta (alternativa):
 
 ```cron
 0 9 * * 1-5  docker compose -f /opt/myinvoice/docker-compose.yml exec -T app php api/bin/cron-send-reminders.php

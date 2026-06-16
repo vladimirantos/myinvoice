@@ -46,18 +46,27 @@ services:
       MYINVOICE_ENABLE_CRON: ${MYINVOICE_ENABLE_CRON:-1}
       # Full-ENV SMTP (12-factor). Prázdné/chybějící klíče se v Configu ignorují
       # (viz Config::applyEnvOverrides guard), takže nepřebijí SMTP z cfg.docker.php.
-      MYINVOICE_SMTP_HOST: ${MYINVOICE_SMTP_HOST}
-      MYINVOICE_SMTP_PORT: ${MYINVOICE_SMTP_PORT}
-      MYINVOICE_SMTP_ENCRYPTION: ${MYINVOICE_SMTP_ENCRYPTION}
-      MYINVOICE_SMTP_AUTH: ${MYINVOICE_SMTP_AUTH}
-      MYINVOICE_SMTP_USER: ${MYINVOICE_SMTP_USER}
-      MYINVOICE_SMTP_PASS: ${MYINVOICE_SMTP_PASS}
-      MYINVOICE_SMTP_FROM_EMAIL: ${MYINVOICE_SMTP_FROM_EMAIL}
-      MYINVOICE_SMTP_FROM_NAME: ${MYINVOICE_SMTP_FROM_NAME}
+      MYINVOICE_SMTP_HOST: ${MYINVOICE_SMTP_HOST:-}
+      MYINVOICE_SMTP_PORT: ${MYINVOICE_SMTP_PORT:-}
+      MYINVOICE_SMTP_ENCRYPTION: ${MYINVOICE_SMTP_ENCRYPTION:-}
+      MYINVOICE_SMTP_AUTH: ${MYINVOICE_SMTP_AUTH:-}
+      MYINVOICE_SMTP_USER: ${MYINVOICE_SMTP_USER:-}
+      MYINVOICE_SMTP_PASS: ${MYINVOICE_SMTP_PASS:-}
+      MYINVOICE_SMTP_FROM_EMAIL: ${MYINVOICE_SMTP_FROM_EMAIL:-}
+      MYINVOICE_SMTP_FROM_NAME: ${MYINVOICE_SMTP_FROM_NAME:-}
 
   db:
     image: mariadb:11
     restart: unless-stopped
+    # Tuning pro hosting s málo pamětí/diskem:
+    #   - performance_schema OFF → ~100–200 MB méně RAM
+    #   - buffer pool 128 MB (RAM) — sniž na 64M přes DB_INNODB_BUFFER_POOL pro malý stroj
+    #   - redo log 48 MB místo default 96 MB → ~50 MB méně na disku (DB_INNODB_LOG_SIZE)
+    # MariaDB redo log při startu bezpečně přesází (po čistém shutdownu), data zůstávají.
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=${DB_INNODB_BUFFER_POOL:-128M}
+      - --innodb-log-file-size=${DB_INNODB_LOG_SIZE:-48M}
     environment:
       # Fail-closed: bez .env se stack nespustí (žádný předvídatelný default).
       # Vytvoř .env s DB_PASSWORD a DB_ROOT_PASSWORD (viz hlavička výše).

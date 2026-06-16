@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 // RouterLink se používá i v Add Currency modalu — import už pokrývá
 import { useI18n } from 'vue-i18n'
@@ -18,11 +18,12 @@ import { vatClassificationsApi, type VatClassification } from '@/api/vatClassifi
 import { settingsApi } from '@/api/settings'
 import { formatMoney } from '@/composables/useFormat'
 import { evalMath } from '@/directives/vMath'
+import { focusLastRow } from '@/composables/useRowFocus'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
 import VendorPicker from '@/components/purchase/VendorPicker.vue'
 import ClientFormModal from '@/components/modals/ClientFormModal.vue'
-import type { Client } from '@/api/clients'
+import { clientsApi, type Client } from '@/api/clients'
 import PdfDropzone from '@/components/purchase/PdfDropzone.vue'
 import PaymentCurrencyBlock from '@/components/purchase/PaymentCurrencyBlock.vue'
 import ExchangeRateInput from '@/components/purchase/ExchangeRateInput.vue'
@@ -62,6 +63,8 @@ const form = ref<{
   exchange_rate_date: string
   exchange_rate_source: ExchangeRateSource
   reverse_charge: boolean
+  prices_include_vat: boolean
+  vendor_is_vat_payer: boolean
   is_fixed_asset: boolean
   vat_deduction: VatDeduction
   vat_deduction_percent: number
@@ -69,6 +72,11 @@ const form = ref<{
   language: 'cs' | 'en'
   note_above_items: string
   note_below_items: string
+  payment_account_number: string
+  payment_bank_code: string
+  payment_iban: string
+  payment_bic: string
+  payment_variable_symbol: string
   advance_paid_amount: number
   rounding: number
   payment_currency_id: number | null
@@ -93,6 +101,8 @@ const form = ref<{
   exchange_rate_date: today,
   exchange_rate_source: 'cnb',
   reverse_charge: false,
+  prices_include_vat: false,
+  vendor_is_vat_payer: true,
   is_fixed_asset: false,
   vat_deduction: 'full',
   vat_deduction_percent: 100,
@@ -100,6 +110,11 @@ const form = ref<{
   language: 'cs',
   note_above_items: '',
   note_below_items: '',
+  payment_account_number: '',
+  payment_bank_code: '',
+  payment_iban: '',
+  payment_bic: '',
+  payment_variable_symbol: '',
   advance_paid_amount: 0,
   rounding: 0,
   payment_currency_id: null,
@@ -117,6 +132,24 @@ const existingPdf = ref<{ path: string; hash: string; size: number; name: string
 const pdfPreviewOpen = ref(false) // default collapsed — user explicitně otevře
 const pdfUploading = ref(false)
 const dropzoneVisible = ref(true)
+
+// Náhled PDF/obrázku připraveného k nahrání u NOVÉ faktury (ještě není na serveru).
+// Soubor držíme jen v paměti prohlížeče (File), náhled tvoříme přes blob: URL —
+// žádný server round-trip není potřeba. URL musíme po výměně/zrušení uvolnit (revoke),
+// jinak by blob zůstal viset v paměti.
+const pendingPdfUrl = ref<string | null>(null)
+const pendingPdfPreviewOpen = ref(false)
+function setPendingPdfUrl(file: File | null) {
+  if (pendingPdfUrl.value) {
+    URL.revokeObjectURL(pendingPdfUrl.value)
+    pendingPdfUrl.value = null
+  }
+  pendingPdfPreviewOpen.value = false
+  if (file) pendingPdfUrl.value = URL.createObjectURL(file)
+}
+// Pro náhled obrázku (JPG/PNG/…) použijeme <img>, pro PDF <iframe> s PDF viewerem.
+const pendingPdfIsImage = computed(() => !!pendingPdfFile.value?.type.startsWith('image/'))
+onBeforeUnmount(() => setPendingPdfUrl(null))
 
 // Diagnostické varování z AI extrakce (např. mezisoučty čteny jako items).
 // Backend sets via PurchaseInvoiceRepository::setExtractionWarning po sanity-check.
@@ -151,6 +184,50 @@ function onVendorSelected(v: any) {
     if (v.default_expense_category_id && form.value.expense_category_id === null) {
       form.value.expense_category_id = v.default_expense_category_id
     }
+  }
+  // Změna dodavatele → online ověř plátcovství DPH (ARES/VIES) a u neplátce vynuť
+  // vat_deduction='none' + vynuluj sazby (žádný nárok na odpočet).
+  if (v && v.id) fetchVendorVatStatus(Number(v.id), true)
+}
+
+// === Plátcovství DPH dodavatele (online ARES/VIES) ===
+const vendorVatStatusLoading = ref(false)
+
+function zeroAllItemRates() {
+  const zero = vatRates.value.find(r => Number(r.rate_percent) === 0 && !r.is_reverse_charge)
+  if (zero) form.value.items.forEach(it => { it.vat_rate_id = zero.id })
+}
+
+/**
+ * enforce=true (změna dodavatele / ruční přepnutí checkboxu) → u neplátce vynutí
+ * vat_deduction='none' + vynuluje sazby. enforce=false (načtení existující faktury) →
+ * jen nastaví příznak pro checkbox, NEpřepisuje uloženou volbu.
+ */
+function applyVendorVatStatus(isVatPayer: boolean, enforce: boolean) {
+  form.value.vendor_is_vat_payer = isVatPayer
+  if (enforce && !isVatPayer) {
+    form.value.vat_deduction = 'none'
+    zeroAllItemRates()
+  }
+}
+
+async function fetchVendorVatStatus(vendorId: number, enforce: boolean) {
+  vendorVatStatusLoading.value = true
+  try {
+    const r = await clientsApi.getVatStatus(vendorId)
+    applyVendorVatStatus(r.is_vat_payer, enforce)
+  } catch {
+    // ARES/VIES nedostupné — necháme dosavadní příznak beze změny.
+  } finally {
+    vendorVatStatusLoading.value = false
+  }
+}
+
+// Ruční přepnutí checkboxu „Dodavatel je plátce DPH" → u neplátce zakázat odpočet.
+function onVendorVatPayerToggle() {
+  if (!form.value.vendor_is_vat_payer) {
+    form.value.vat_deduction = 'none'
+    zeroAllItemRates()
   }
 }
 
@@ -245,10 +322,12 @@ onMounted(async () => {
     const qVendor = Number(route.query.vendor_id)
     if (!isNaN(qVendor) && qVendor > 0) {
       form.value.vendor_id = qVendor
+      void fetchVendorVatStatus(qVendor, true)
     }
-    // Default první prázdná položka pro nový draft (user feedback: UX, méně klikání)
+    // Default první prázdná položka pro nový draft (user feedback: UX, méně klikání).
+    // Seed NEsmí schovat dropzone — jinak by upload PDF u nové faktury nikdy nebyl vidět.
     if (form.value.items.length === 0) {
-      addItem()
+      addItem(false)
     }
   }
   loaded.value = true
@@ -299,6 +378,7 @@ function populate(inv: PurchaseInvoice) {
   form.value.exchange_rate_date = inv.exchange_rate_date || inv.issue_date
   form.value.exchange_rate_source = inv.exchange_rate_source
   form.value.reverse_charge = inv.reverse_charge
+  form.value.prices_include_vat = (inv as { prices_include_vat?: boolean }).prices_include_vat ?? false
   form.value.is_fixed_asset = (inv as { is_fixed_asset?: boolean }).is_fixed_asset ?? false
   form.value.vat_deduction = inv.vat_deduction ?? 'full'
   form.value.vat_deduction_percent = inv.vat_deduction_percent ?? 100
@@ -306,6 +386,11 @@ function populate(inv: PurchaseInvoice) {
   form.value.language = inv.language
   form.value.note_above_items = inv.note_above_items || ''
   form.value.note_below_items = inv.note_below_items || ''
+  form.value.payment_account_number = inv.payment_account_number || ''
+  form.value.payment_bank_code = inv.payment_bank_code || ''
+  form.value.payment_iban = inv.payment_iban || ''
+  form.value.payment_bic = inv.payment_bic || ''
+  form.value.payment_variable_symbol = inv.payment_variable_symbol || ''
   form.value.advance_paid_amount = inv.advance_paid_amount
   form.value.rounding = Number(inv.rounding) || 0
   form.value.payment_currency_id = inv.payment_currency_id
@@ -317,6 +402,15 @@ function populate(inv: PurchaseInvoice) {
   form.value.vat_classification_code = inv.vat_classification_code ?? null
   form.value.items = inv.items.length > 0 ? inv.items : []
   extractionWarning.value = inv.extraction_warning ?? null
+  // Ruční rekapitulace DPH dle dokladu (§ 73) → naplň override mapu.
+  vatOverrides.value = {}
+  for (const o of inv.vat_overrides ?? []) {
+    vatOverrides.value[String(o.rate)] = { base: o.base, vat: o.vat }
+  }
+  // Existující faktura: zobraz plátcovství dodavatele (jen příznak, NEpřepisuj uloženou
+  // volbu vat_deduction). Při ruční změně dodavatele/checkboxu se enforce zapne.
+  form.value.vendor_is_vat_payer = (inv as { vendor_is_vat_payer?: boolean }).vendor_is_vat_payer ?? true
+  if (inv.vendor_id) void fetchVendorVatStatus(inv.vendor_id, false)
 
   if (inv.pdf_path) {
     existingPdf.value = {
@@ -330,7 +424,7 @@ function populate(inv: PurchaseInvoice) {
   }
 }
 
-function addItem() {
+function addItem(hideDropzone = true) {
   form.value.items.push({
     description: '',
     quantity: 1,
@@ -339,8 +433,12 @@ function addItem() {
     vat_rate_id: vatRates.value.find(v => v.is_default)?.id || vatRates.value[0]?.id || 1,
     order_index: form.value.items.length,
   })
-  // user začal editovat → schovej dropzone, ať se nepřeplňuje
-  dropzoneVisible.value = false
+  // user začal editovat (klik na „přidat položku") → schovej dropzone, ať se nepřeplňuje.
+  // Automatický seed první položky při mountu posílá hideDropzone=false (viz onMounted).
+  if (hideDropzone) {
+    dropzoneVisible.value = false
+    focusLastRow('[data-row-input="pur-item"]') // jen u user kliku, ne u seedu při mountu
+  }
 }
 
 function removeItem(idx: number) {
@@ -349,23 +447,43 @@ function removeItem(idx: number) {
 
 // Per-item live calc preview (read-only, server přepočte při save)
 function itemTotal(it: PurchaseInvoiceItem) {
-  const base = Number(it.quantity || 0) * Number(it.unit_price_without_vat || 0)
+  const amt = Number(it.quantity || 0) * Number(it.unit_price_without_vat || 0)
   const rate = form.value.reverse_charge ? 0 : (vatRates.value.find(v => v.id === it.vat_rate_id)?.rate_percent || 0)
-  const vat = base * rate / 100
-  return { base: round2(base), vat: round2(vat), with: round2(base + vat) }
+  // Režim "ceny s DPH": unit_price_without_vat nese cenu S DPH (gross) → DPH shora.
+  if (form.value.prices_include_vat) {
+    const vat = round2(amt * rate / (100 + rate))
+    return { base: round2(amt - vat), vat, with: round2(amt) }
+  }
+  const vat = amt * rate / 100
+  return { base: round2(amt), vat: round2(vat), with: round2(amt + vat) }
 }
 function round2(n: number) { return Math.round(n * 100) / 100 }
 
-// Zadání částky s DPH → zpětný dopočet jednotkové ceny bez DPH (gross / (1+sazba) / množství).
-// Podporuje i výrazy (evalMath: "1210", "1000*1.21", desetinná čárka).
+// Zadání částky s DPH na řádku „Celkem s DPH" → dopočet jednotkové ceny.
+// Přepínač „ceny s DPH" záměrně NEpřepínáme — respektujeme aktuální režim faktury:
+//  • režim „ceny s DPH" zapnutý → unit_price nese gross → ulož gross / množství,
+//  • režim vypnutý (běžný) → z gross odečti DPH shora a ulož netto / množství.
+// Podporuje i výrazy (evalMath: "1210", "1000*1.21", desetinná čárka). Server přepočítá přesně.
 function setItemGross(it: PurchaseInvoiceItem, raw: string): void {
   const gross = evalMath(raw)
   if (gross === null) return
   const qty = Number(it.quantity) || 0
   if (qty === 0) return
-  const rate = form.value.reverse_charge ? 0 : Number(vatRates.value.find(v => v.id === it.vat_rate_id)?.rate_percent || 0)
-  it.unit_price_without_vat = round2(gross / (1 + rate / 100) / qty)
+  if (form.value.prices_include_vat) {
+    // unit_price_without_vat nese cenu S DPH → ulož gross jako jednotkovou cenu.
+    it.unit_price_without_vat = round2(gross / qty)
+    return
+  }
+  // Běžný režim: dopočti netto odečtením DPH shora (u reverse-charge je sazba 0).
+  const rate = form.value.reverse_charge ? 0 : (vatRates.value.find(v => v.id === it.vat_rate_id)?.rate_percent || 0)
+  const net = gross / (1 + rate / 100)
+  it.unit_price_without_vat = round2(net / qty)
 }
+
+// Záhlaví sloupce jednotkové ceny — v režimu „ceny s DPH" je to cena včetně DPH.
+const unitPriceHeaderLabel = computed(() => form.value.prices_include_vat
+  ? t('purchase_invoice.items.unit_price_gross')
+  : t('purchase_invoice.items.unit_price'))
 
 // Popisek sazby — odliš dvě 0% sazby (osvobozeno vs. přenesená DPH), jako u vydané faktury.
 function vatRateLabel(r: VatRate): string {
@@ -374,12 +492,71 @@ function vatRateLabel(r: VatRate): string {
   return t('invoice.vat_rate_label.exempt')
 }
 
-const totals = computed(() => {
-  let base = 0, vat = 0
+// ── Rekapitulace DPH per sazba + ruční override dle dokladu (§ 73 ZDPH) ──
+// Vypočtená rekapitulace (per sazba) ze součtu řádků — default hodnoty.
+const computedRecap = computed(() => {
+  const map = new Map<number, { rate: number; base: number; vat: number }>()
   for (const it of form.value.items) {
     const t = itemTotal(it)
-    base += t.base; vat += t.vat
+    const rate = form.value.reverse_charge ? 0 : (vatRates.value.find(v => v.id === it.vat_rate_id)?.rate_percent ?? 0)
+    const cur = map.get(rate) ?? { rate, base: 0, vat: 0 }
+    cur.base = round2(cur.base + t.base)
+    cur.vat = round2(cur.vat + t.vat)
+    map.set(rate, cur)
   }
+  return [...map.values()].sort((a, b) => b.rate - a.rate)
+})
+
+// Ruční overridy per sazba (klíč = sazba jako string). Prázdné = počítat standardně.
+const vatOverrides = ref<Record<string, { base: number; vat: number }>>({})
+
+// Řádky pro UI: merge vypočtené rekapitulace s overridy (+ příznak „ručně upraveno").
+const recapRows = computed(() => computedRecap.value.map(r => {
+  const ov = vatOverrides.value[String(r.rate)]
+  return {
+    rate: r.rate,
+    base: ov ? ov.base : r.base,
+    vat: ov ? ov.vat : r.vat,
+    computedBase: r.base,
+    computedVat: r.vat,
+    overridden: !!ov,
+  }
+}))
+
+function setRecapBase(rate: number, raw: string): void {
+  const v = evalMath(raw)
+  if (v === null) return
+  const key = String(rate)
+  const row = computedRecap.value.find(r => r.rate === rate)
+  const cur = vatOverrides.value[key] ?? { base: row?.base ?? 0, vat: row?.vat ?? 0 }
+  vatOverrides.value = { ...vatOverrides.value, [key]: { ...cur, base: round2(v) } }
+}
+function setRecapVat(rate: number, raw: string): void {
+  const v = evalMath(raw)
+  if (v === null) return
+  const key = String(rate)
+  const row = computedRecap.value.find(r => r.rate === rate)
+  const cur = vatOverrides.value[key] ?? { base: row?.base ?? 0, vat: row?.vat ?? 0 }
+  vatOverrides.value = { ...vatOverrides.value, [key]: { ...cur, vat: round2(v) } }
+}
+function resetRecapRate(rate: number): void {
+  const next = { ...vatOverrides.value }
+  delete next[String(rate)]
+  vatOverrides.value = next
+}
+const hasVatOverride = computed(() => Object.keys(vatOverrides.value).length > 0)
+
+// Payload pro server — jen sazby, které na faktuře stále existují.
+function buildVatOverridesPayload(): Array<{ rate: number; base: number; vat: number }> {
+  return Object.entries(vatOverrides.value)
+    .filter(([key]) => computedRecap.value.some(r => String(r.rate) === key))
+    .map(([key, v]) => ({ rate: Number(key), base: v.base, vat: v.vat }))
+}
+
+// Součty z (případně přepsané) rekapitulace → všechny totály dole sedí na doklad.
+const totals = computed(() => {
+  let base = 0, vat = 0
+  for (const r of recapRows.value) { base += r.base; vat += r.vat }
   return { without_vat: round2(base), vat: round2(vat), with_vat: round2(base + vat) }
 })
 
@@ -390,8 +567,17 @@ async function onPdfDropped(file: File) {
     await uploadPdfToInvoice(invoiceId.value, file)
   } else {
     pendingPdfFile.value = file
+    setPendingPdfUrl(file)
+    dropzoneVisible.value = false
     toast.success(t('purchase_invoice.pdf.pending_upload', { name: file.name }))
   }
+}
+
+// Odebrání souboru připraveného k nahrání (u nové faktury, před uložením).
+function clearPendingPdf() {
+  pendingPdfFile.value = null
+  setPendingPdfUrl(null)
+  dropzoneVisible.value = true
 }
 
 const pendingPdfFile = ref<File | null>(null)
@@ -442,6 +628,7 @@ async function onReplacePdf() {
   }
   existingPdf.value = null
   pendingPdfFile.value = null
+  setPendingPdfUrl(null)
   dropzoneVisible.value = true
 }
 
@@ -465,6 +652,7 @@ async function submit() {
       exchange_rate_date: form.value.exchange_rate_date || null,
       exchange_rate_source: form.value.exchange_rate_source,
       reverse_charge: form.value.reverse_charge,
+      prices_include_vat: form.value.prices_include_vat,
       is_fixed_asset: form.value.is_fixed_asset,
       vat_deduction: form.value.vat_deduction,
       vat_deduction_percent: form.value.vat_deduction_percent,
@@ -472,6 +660,16 @@ async function submit() {
       language: form.value.language,
       note_above_items: form.value.note_above_items || null,
       note_below_items: form.value.note_below_items || null,
+      // Platební účet dodavatele pro QR platbu (ruční úprava v editoru = source 'manual';
+      // backend nastaví source/checked_at jen pokud je účet skutečně vyplněný).
+      payment: {
+        account_number: form.value.payment_account_number.trim() || null,
+        bank_code: form.value.payment_bank_code.trim() || null,
+        iban: form.value.payment_iban.trim().replace(/\s+/g, '').toUpperCase() || null,
+        bic: form.value.payment_bic.trim().toUpperCase() || null,
+        variable_symbol: form.value.payment_variable_symbol.trim() || null,
+        source: 'manual',
+      },
       advance_paid_amount: form.value.advance_paid_amount,
       rounding: form.value.rounding,
       payment_currency_id: form.value.payment_currency_id,
@@ -481,6 +679,8 @@ async function submit() {
       exchange_diff_base: form.value.exchange_diff_base,
       expense_category_id: form.value.expense_category_id,
       vat_classification_code: form.value.vat_classification_code,
+      // Ruční rekapitulace DPH dle dokladu (§ 73) — [] vyčistí případný starý override.
+      vat_overrides: buildVatOverridesPayload(),
       items: form.value.items.map((it, i) => ({
         description: it.description,
         quantity: Number(it.quantity || 0),
@@ -503,6 +703,7 @@ async function submit() {
     if (pendingPdfFile.value) {
       await uploadPdfToInvoice(inv.id, pendingPdfFile.value)
       pendingPdfFile.value = null
+      setPendingPdfUrl(null)
     }
     toast.success(isEdit.value ? t('common.saved') : t('common.created'))
     // Non-blocking varování ze serveru (např. dobropis s kladným součtem — issue #35).
@@ -516,6 +717,11 @@ async function submit() {
       fieldErrors.value = data.fields
     }
     error.value = apiErrorMessage(e)
+    // Toast + scroll k bannéru — uživatel může být odscrollovaný dole u tlačítka Uložit
+    // a jinak by validační chybu vůbec neviděl (jen tichý 422).
+    toast.error(error.value)
+    await nextTick()
+    document.querySelector('[data-error-banner]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   } finally {
     submitting.value = false
   }
@@ -538,7 +744,7 @@ function fieldErr(key: string): string | null {
       </RouterLink>
     </header>
 
-    <div v-if="error" class="p-3 bg-danger-50 border border-danger-500/40 text-danger-600 rounded-md text-sm">
+    <div v-if="error" data-error-banner class="p-3 bg-danger-50 border border-danger-500/40 text-danger-600 rounded-md text-sm">
       {{ error }}
     </div>
 
@@ -571,6 +777,77 @@ function fieldErr(key: string): string | null {
         <p class="text-xs text-neutral-500 mt-2">
           {{ t('purchase_invoice.extraction.ai_pending') }}
         </p>
+      </div>
+
+      <!-- Soubor připravený k nahrání u nové faktury (nahraje se po prvním uložení) -->
+      <div v-if="!isEdit && pendingPdfFile" class="bg-success-50 border border-success-500/40 rounded-lg shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <svg class="w-7 h-8 shrink-0" viewBox="0 0 32 36" xmlns="http://www.w3.org/2000/svg">
+              <path fill="#dc2626" d="M4 2h16l8 8v22a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/>
+              <path fill="#ffffff" opacity="0.35" d="M20 2v8h8z"/>
+              <text x="16" y="26" fill="#ffffff" font-family="Arial,Helvetica,sans-serif" font-size="8" font-weight="700" text-anchor="middle" letter-spacing="0.3">PDF</text>
+            </svg>
+            <div class="min-w-0">
+              <div class="font-medium text-sm truncate">{{ pendingPdfFile.name }}</div>
+              <div class="text-xs text-success-700 flex items-center gap-1">
+                <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                {{ t('purchase_invoice.pdf.pending_badge') }}
+              </div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap shrink-0">
+            <button
+              v-if="pendingPdfUrl"
+              type="button"
+              @click="pendingPdfPreviewOpen = !pendingPdfPreviewOpen"
+              class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5"
+            >
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+              </svg>
+              {{ pendingPdfPreviewOpen ? t('purchase_invoice.pdf.hide') : t('purchase_invoice.pdf.show') }}
+            </button>
+            <a
+              v-if="pendingPdfUrl"
+              :href="pendingPdfUrl"
+              target="_blank"
+              rel="noopener"
+              class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5"
+            >
+              <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              {{ t('purchase_invoice.pdf.open') }}
+            </a>
+            <button
+              type="button"
+              @click="clearPendingPdf"
+              class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5"
+            >
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              {{ t('common.remove') }}
+            </button>
+          </div>
+        </div>
+        <!-- Inline náhled ze souboru v paměti (blob: URL) — faktura ještě není na serveru.
+             Obrázek přes <img>, PDF přes <embed> (NE <iframe> ani #view= fragment — Chrome
+             odmítá blob PDF v iframu / s fragmentem jako „local resource"). Když ani <embed>
+             nevykreslí, je tu tlačítko „Otevřít" pro zobrazení v nové záložce. -->
+        <div v-if="pendingPdfPreviewOpen && pendingPdfUrl" class="bg-neutral-100 border-t border-success-500/30">
+          <img
+            v-if="pendingPdfIsImage"
+            :src="pendingPdfUrl"
+            :alt="pendingPdfFile?.name || 'preview'"
+            class="w-full max-h-[80vh] object-contain mx-auto"
+          />
+          <embed
+            v-else
+            :src="pendingPdfUrl"
+            type="application/pdf"
+            class="w-full h-[80vh] border-0"
+            :title="pendingPdfFile?.name || 'PDF'"
+          />
+        </div>
       </div>
 
       <!-- Existující PDF na detail/edit (s inline preview, stejný pattern jako InvoiceDetail.vue) -->
@@ -687,7 +964,7 @@ function fieldErr(key: string): string | null {
             <label class="block text-sm text-neutral-700 mb-1">{{ t('purchase_invoice.fields.varsymbol') }}</label>
             <input v-model="form.varsymbol" type="text" maxlength="20"
                    class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono"
-                   placeholder="PF-202605-NNNN" />
+                   placeholder="PF2605001" />
             <p class="text-xs text-neutral-500 mt-1">{{ t('purchase_invoice.fields.varsymbol_hint') }}</p>
           </div>
         </div>
@@ -711,6 +988,10 @@ function fieldErr(key: string): string | null {
             <input v-model="form.received_at" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
         </div>
+        <!-- RC: DPH období se řídí DUZP (§ 25 / § 24), ne datem vystavení — issue #117 -->
+        <p v-if="form.reverse_charge" class="text-xs text-neutral-500 -mt-2">
+          {{ t('purchase_invoice.fields.tax_date_rc_hint') }}
+        </p>
 
         <!-- Currency + exchange rate -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -751,9 +1032,18 @@ function fieldErr(key: string): string | null {
             <input type="checkbox" v-model="form.reverse_charge" class="rounded" />
             {{ t('purchase_invoice.fields.reverse_charge') }}
           </label>
+          <label class="inline-flex items-center gap-2 text-sm" :title="t('purchase_invoice.fields.vendor_is_vat_payer_hint')">
+            <input type="checkbox" v-model="form.vendor_is_vat_payer" @change="onVendorVatPayerToggle" class="rounded" />
+            <span :class="!form.vendor_is_vat_payer ? 'text-warning-700' : ''">{{ t('purchase_invoice.fields.vendor_is_vat_payer') }}</span>
+            <span v-if="vendorVatStatusLoading" class="text-xs text-neutral-400">…</span>
+          </label>
           <label class="inline-flex items-center gap-2 text-sm" :title="t('purchase_invoice.fields.is_fixed_asset_hint')">
             <input type="checkbox" v-model="form.is_fixed_asset" class="rounded" />
             {{ t('purchase_invoice.fields.is_fixed_asset') }}
+          </label>
+          <label class="inline-flex items-center gap-2 text-sm" :title="t('purchase_invoice.fields.prices_include_vat_hint')">
+            <input type="checkbox" v-model="form.prices_include_vat" class="rounded" />
+            {{ t('purchase_invoice.fields.prices_include_vat') }}
           </label>
           <div class="inline-flex items-center gap-2">
             <label class="text-sm text-neutral-700">{{ t('purchase_invoice.fields.language') }}:</label>
@@ -769,7 +1059,7 @@ function fieldErr(key: string): string | null {
       <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
         <header class="flex items-center justify-between px-5 py-3 border-b border-neutral-100">
           <h2 class="text-sm font-medium text-neutral-700">{{ t('purchase_invoice.items.title') }}</h2>
-          <button type="button" @click="addItem" class="cursor-pointer px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md font-medium">
+          <button type="button" @click="addItem()" class="cursor-pointer px-3 h-8 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-md font-medium">
             {{ t('purchase_invoice.items.add') }}
           </button>
         </header>
@@ -784,37 +1074,39 @@ function fieldErr(key: string): string | null {
               <th class="text-left py-2 pl-5 pr-2 font-normal">{{ t('purchase_invoice.items.description') }}</th>
               <th class="text-right py-2 px-1 font-normal w-20">{{ t('purchase_invoice.items.quantity') }}</th>
               <th class="text-left py-2 px-1 font-normal w-20">{{ t('purchase_invoice.items.unit') }}</th>
-              <th class="text-right py-2 px-1 font-normal w-28">{{ t('purchase_invoice.items.unit_price') }}</th>
+              <th class="text-right py-2 px-1 font-normal w-28">{{ unitPriceHeaderLabel }}</th>
               <th class="text-left py-2 px-1 font-normal w-24">{{ t('purchase_invoice.items.vat_rate') }}</th>
               <th class="text-right py-2 px-1 font-normal w-28">{{ t('purchase_invoice.items.total_with_vat') }}</th>
               <th class="w-10 pr-3"></th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(it, i) in form.items" :key="i" class="border-t border-neutral-100">
+            <tr v-for="(it, i) in form.items" :key="i" class="border-t border-neutral-200">
               <td class="py-2 pl-5 pr-2">
-                <input v-model="it.description" type="text" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm" />
+                <input v-model="it.description" type="text" data-row-input="pur-item" class="w-full h-9 px-2 border rounded text-sm"
+                       :class="fieldErr(`items.${i}.description`) ? 'border-danger-500/60' : 'border-neutral-300'" />
+                <p v-if="fieldErr(`items.${i}.description`)" class="text-xs text-danger-600 mt-1">{{ fieldErr(`items.${i}.description`) }}</p>
               </td>
               <td class="py-2 px-1">
-                <input v-model="it.quantity" v-math type="text" inputmode="decimal" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
+                <input v-model="it.quantity" v-math type="text" inputmode="decimal" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
               </td>
               <td class="py-2 px-1">
-                <select v-model="it.unit" class="w-full h-9 px-1 border border-neutral-200 rounded bg-surface text-sm">
+                <select v-model="it.unit" class="w-full h-9 px-1 border border-neutral-300 rounded bg-surface text-sm">
                   <option v-for="u in units" :key="u.code" :value="u.code">{{ u.code }}</option>
                 </select>
               </td>
               <td class="py-2 px-1">
-                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
+                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
               </td>
               <td class="py-2 px-1">
-                <select v-model.number="it.vat_rate_id" class="w-full h-9 px-1 border border-neutral-200 rounded bg-surface text-sm">
+                <select v-model.number="it.vat_rate_id" class="w-full h-9 px-1 border border-neutral-300 rounded bg-surface text-sm">
                   <option v-for="v in vatRates" :key="v.id" :value="v.id">{{ vatRateLabel(v) }}</option>
                 </select>
               </td>
               <td class="py-2 px-1">
                 <input :value="itemTotal(it).with" @change="setItemGross(it, ($event.target as HTMLInputElement).value)"
                   type="text" inputmode="decimal" :title="t('purchase_invoice.items.gross_edit_hint')"
-                  class="w-full h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono" />
+                  class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
               </td>
               <td class="py-2 px-1 pr-3 text-center">
                 <button type="button" @click="removeItem(i)" class="cursor-pointer w-8 h-8 inline-flex items-center justify-center text-neutral-400 hover:text-danger-600 hover:bg-danger-50 rounded" :title="t('purchase_invoice.items.remove')">✕</button>
@@ -825,7 +1117,7 @@ function fieldErr(key: string): string | null {
         </div>
 
         <!-- Mobile: stack karet (každé pole na vlastním řádku, čitelné inputy) -->
-        <div v-if="form.items.length > 0" class="md:hidden divide-y divide-neutral-100 border-t border-neutral-100">
+        <div v-if="form.items.length > 0" class="md:hidden divide-y divide-neutral-200 border-t border-neutral-200">
           <div v-for="(it, i) in form.items" :key="`m-${i}`" class="p-3 space-y-2">
             <div class="flex items-center justify-between text-xs text-neutral-500">
               <span class="font-mono">#{{ i + 1 }}</span>
@@ -833,37 +1125,39 @@ function fieldErr(key: string): string | null {
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('purchase_invoice.items.description') }}</label>
-              <input v-model="it.description" type="text" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm" />
+              <input v-model="it.description" type="text" data-row-input="pur-item" class="w-full h-10 px-3 border rounded text-sm"
+                     :class="fieldErr(`items.${i}.description`) ? 'border-danger-500/60' : 'border-neutral-300'" />
+              <p v-if="fieldErr(`items.${i}.description`)" class="text-xs text-danger-600 mt-1">{{ fieldErr(`items.${i}.description`) }}</p>
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('purchase_invoice.items.quantity') }}</label>
-                <input v-model="it.quantity" v-math type="text" inputmode="decimal" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm text-right font-mono" />
+                <input v-model="it.quantity" v-math type="text" inputmode="decimal" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm text-right font-mono" />
               </div>
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('purchase_invoice.items.unit') }}</label>
-                <select v-model="it.unit" class="w-full h-10 px-2 border border-neutral-200 rounded bg-surface text-sm">
+                <select v-model="it.unit" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm">
                   <option v-for="u in units" :key="u.code" :value="u.code">{{ u.code }}</option>
                 </select>
               </div>
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div>
-                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('purchase_invoice.items.unit_price') }}</label>
-                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" class="w-full h-10 px-3 border border-neutral-200 rounded text-sm text-right font-mono" />
+                <label class="block text-xs font-medium text-neutral-600 mb-1">{{ unitPriceHeaderLabel }}</label>
+                <input v-model="it.unit_price_without_vat" v-math type="text" inputmode="decimal" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm text-right font-mono" />
               </div>
               <div>
                 <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('purchase_invoice.items.vat_rate') }}</label>
-                <select v-model.number="it.vat_rate_id" class="w-full h-10 px-2 border border-neutral-200 rounded bg-surface text-sm">
+                <select v-model.number="it.vat_rate_id" class="w-full h-10 px-2 border border-neutral-300 rounded bg-surface text-sm">
                   <option v-for="v in vatRates" :key="v.id" :value="v.id">{{ vatRateLabel(v) }}</option>
                 </select>
               </div>
             </div>
-            <div class="flex items-baseline justify-between pt-1 border-t border-neutral-100">
+            <div class="flex items-baseline justify-between pt-1 border-t border-neutral-200">
               <span class="text-xs font-medium text-neutral-500 uppercase tracking-wide">{{ t('purchase_invoice.items.total_with_vat') }}</span>
               <input :value="itemTotal(it).with" @change="setItemGross(it, ($event.target as HTMLInputElement).value)"
                 type="text" inputmode="decimal" :title="t('purchase_invoice.items.gross_edit_hint')"
-                class="w-32 h-9 px-2 border border-neutral-200 rounded text-sm text-right font-mono font-semibold" />
+                class="w-32 h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono font-semibold" />
             </div>
           </div>
         </div>
@@ -900,6 +1194,57 @@ function fieldErr(key: string): string | null {
               <td class="text-right font-mono pt-1.5">{{ formatMoney(totals.with_vat + (form.rounding || 0) - (form.advance_paid_amount || 0), currencyCode) }}</td>
             </tr>
           </table>
+        </div>
+      </div>
+
+      <!-- Box 2b: Rekapitulace DPH — editovatelná dle dokladu dodavatele (§ 73 ZDPH).
+           Pod reverse-charge se skrývá (na dokladu zahr. dodavatele není česká DPH). -->
+      <div v-if="form.items.length > 0 && !form.reverse_charge" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+        <div class="px-5 py-3 border-b border-neutral-100 flex items-center justify-between gap-3">
+          <h2 class="text-sm font-medium text-neutral-700">{{ t('purchase_invoice.vat_recap.title') }}</h2>
+          <button v-if="hasVatOverride" type="button" @click="vatOverrides = {}"
+            class="cursor-pointer text-xs text-primary-700 hover:underline">
+            {{ t('purchase_invoice.vat_recap.reset_all') }}
+          </button>
+        </div>
+        <div class="px-5 py-3">
+          <p class="text-xs text-neutral-500 mb-3">{{ t('purchase_invoice.vat_recap.hint') }}</p>
+          <table class="w-full sm:w-auto text-sm">
+            <thead>
+              <tr class="text-xs text-neutral-500">
+                <th class="text-left font-normal py-1 pr-6">{{ t('purchase_invoice.vat_recap.rate') }}</th>
+                <th class="text-right font-normal py-1 px-2">{{ t('purchase_invoice.vat_recap.base') }}</th>
+                <th class="text-right font-normal py-1 px-2">{{ t('purchase_invoice.vat_recap.vat') }}</th>
+                <th class="w-8"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in recapRows" :key="r.rate" class="border-t border-neutral-100">
+                <td class="py-1.5 pr-6 text-neutral-700 font-medium">{{ r.rate }} %</td>
+                <td class="py-1.5 px-2">
+                  <input :value="r.base" @change="setRecapBase(r.rate, ($event.target as HTMLInputElement).value)"
+                    type="text" inputmode="decimal"
+                    class="w-32 h-8 px-2 border rounded text-sm text-right font-mono"
+                    :class="r.overridden ? 'border-warning-500/60 bg-warning-50' : 'border-neutral-300'" />
+                </td>
+                <td class="py-1.5 px-2">
+                  <input :value="r.vat" @change="setRecapVat(r.rate, ($event.target as HTMLInputElement).value)"
+                    type="text" inputmode="decimal"
+                    class="w-32 h-8 px-2 border rounded text-sm text-right font-mono"
+                    :class="r.overridden ? 'border-warning-500/60 bg-warning-50' : 'border-neutral-300'" />
+                </td>
+                <td class="py-1.5 pl-1 text-right">
+                  <button v-if="r.overridden" type="button" @click="resetRecapRate(r.rate)"
+                    :title="t('purchase_invoice.vat_recap.reset')"
+                    class="cursor-pointer text-neutral-400 hover:text-primary-700 text-base leading-none">↺</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="hasVatOverride" class="text-xs text-warning-700 mt-3 flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+            {{ t('purchase_invoice.vat_recap.overridden_note') }}
+          </p>
         </div>
       </div>
 
@@ -994,10 +1339,43 @@ function fieldErr(key: string): string | null {
         </div>
       </div>
 
+      <!-- Box 5: Platební účet dodavatele (pro „Zaplatit pomocí QR") -->
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h2 class="text-sm font-medium text-neutral-700 mb-1">{{ t('purchase_invoice.qr.account_section') }}</h2>
+        <p class="text-xs text-neutral-500 mb-3">{{ t('purchase_invoice.qr.account_section_hint') }}</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-neutral-500 mb-1">{{ t('purchase_invoice.qr.account') }}</label>
+            <input v-model="form.payment_account_number" type="text" placeholder="19-2000145399"
+              class="w-full px-3 h-9 border border-neutral-300 rounded-md text-sm font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-neutral-500 mb-1">{{ t('purchase_invoice.qr.bank_code') }}</label>
+            <input v-model="form.payment_bank_code" type="text" placeholder="0800"
+              class="w-full px-3 h-9 border border-neutral-300 rounded-md text-sm font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-neutral-500 mb-1">{{ t('purchase_invoice.qr.iban') }}</label>
+            <input v-model="form.payment_iban" type="text" placeholder="CZ65 0800 0000 1920 0014 5399"
+              class="w-full px-3 h-9 border border-neutral-300 rounded-md text-sm font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-neutral-500 mb-1">{{ t('purchase_invoice.qr.bic') }}</label>
+            <input v-model="form.payment_bic" type="text" placeholder="GIBACZPX"
+              class="w-full px-3 h-9 border border-neutral-300 rounded-md text-sm font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-neutral-500 mb-1">{{ t('purchase_invoice.qr.variable_symbol') }}</label>
+            <input v-model="form.payment_variable_symbol" type="text"
+              class="w-full px-3 h-9 border border-neutral-300 rounded-md text-sm font-mono" />
+          </div>
+        </div>
+      </div>
+
       <!-- Submit bar — sticky bottom -->
-      <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm flex items-center justify-end gap-2">
-        <RouterLink to="/purchase-invoices" class="px-4 h-10 inline-flex items-center text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">
-          {{ t('purchase_invoice.actions.back') }}
+      <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm flex items-center justify-between gap-2">
+        <RouterLink to="/purchase-invoices" class="px-4 h-10 inline-flex items-center text-sm text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-colors">
+          ← {{ t('purchase_invoice.actions.back') }}
         </RouterLink>
         <button type="submit" :disabled="submitting" class="cursor-pointer px-5 h-10 inline-flex items-center text-sm font-medium bg-primary-600 hover:bg-primary-700 text-white rounded-md disabled:opacity-50">
           {{ submitting ? '…' : t('purchase_invoice.actions.save') }}

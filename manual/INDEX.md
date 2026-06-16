@@ -1,66 +1,79 @@
 # MyInvoice.cz — uživatelský manuál
 
-[🌐 MyInvoice.cz](https://myinvoice.cz/) · [⭐ GitHub](https://github.com/radekhulan/myinvoice) · [📦 GHCR Docker](https://github.com/radekhulan/myinvoice/pkgs/container/myinvoice)
+[🌐 MyInvoice.cz](https://myinvoice.cz/) [⭐ GitHub](https://github.com/radekhulan/myinvoice) [📦 GHCR Docker](https://github.com/radekhulan/myinvoice/pkgs/container/myinvoice) [🏢 MyWebdesign.cz s.r.o.](https://mywebdesign.cz/)
 
-> Verze: 4.0.0 · Datum: 2026-05-22 · Vyvíjí [MyWebdesign.cz s.r.o.](https://mywebdesign.cz/)
+Vítej v manuálu k fakturačnímu systému **MyInvoice.cz**. Kapitoly jsou seřazené
+podle struktury menu v aplikaci — od instalace, přes vystavování a příjem faktur,
+finanční přehledy, dokumenty a daňové výkazy, až po systémová nastavení.
 
-Vítej v manuálu k fakturačnímu systému **MyInvoice.cz**. Manuál pokrývá vše, co
-v aplikaci uděláš — od prvního přihlášení, přes vystavení faktury a její
-odeslání e-mailem, import bankovního výpisu, upomínání po splatnosti, až po
-exporty pro účetní software.
-
-První kapitola **Instalace** je technická (cílí na osobu, která systém
-nasazuje). Zbytek je psaný pro běžného uživatele — bez programátorského
-žargonu.
+První kapitoly **Instalace** jsou technické (cílí na osobu, která systém
+nasazuje). Zbytek je psaný pro běžného uživatele — bez programátorského žargonu.
 
 ---
 
 ![Přehled (dashboard)](img/01_dashboard.webp)
 
-### Začínáme
+### Instalace a start
 
-1. [Úvod — co MyInvoice.cz umí](01_Uvod.md)
-2. [Instalace (Docker / nativní)](02_Instalace.md)
-3. [První spuštění (setup wizard)](03_Setup_wizard.md)
-4. [Přihlášení a uživatelský profil](04_Prihlaseni.md)
-5. [Přehled (dashboard)](05_Prehled.md)
-6. [Fakturujeme — daňový průvodce (plátce/neplátce, DPH, RC, OSS)](06_Fakturujeme.md)
+1. [Úvod](01_Uvod.md)
+2. [Instalace — Quickstart](02_Instalace_Quickstart.md)
+3. [Instalace — Docker](03_Instalace_Docker.md)
+4. [Instalace — Nativní](04_Instalace_Nativni.md)
+5. [Po instalaci a CLI](05_Po_instalaci.md)
+6. [První spuštění](06_Setup_wizard.md)
+7. [Přihlášení](07_Prihlaseni.md)
+8. [Přehled](08_Prehled.md)
 
-### Práce s daty
+### Prodej
 
-7. [Klienti](07_Klienti.md)
-8. [Zakázky (vč. schvalování výkazů zákazníkem)](08_Zakazky.md)
-9. [Faktury — seznam a hromadné akce](09_Faktury.md)
-10. [Přijaté faktury (nákupy)](10_Prijate_faktury.md) — nové ve v3.5.0
-11. [Faktura — editor, výkaz víceprací a schvalování zákazníkem](11_Faktura_editor.md)
-12. [Faktura — PDF, QR platba, odeslání e-mailem](12_Faktura_PDF.md)
+9. [Faktury (seznam)](09_Faktury.md)
+10. [Editor faktury](10_Faktura_editor.md)
+11. [Faktura PDF a e-mail](11_Faktura_PDF.md)
+12. [Pravidelné faktury](12_Pravidelne_fakturace.md)
+13. [Klienti](13_Klienti.md)
+14. [Zakázky](14_Zakazky.md)
+15. [Exporty](15_Exporty.md)
+16. [Importy](16_Importy.md)
 
-### Platby a komunikace
+### Nákup
 
-13. [Banka — import výpisů a párování plateb](13_Banka.md)
-14. [Upomínky po splatnosti](14_Upominky.md)
-15. [Pravidelné fakturace (recurring invoices)](15_Pravidelne_fakturace.md)
+17. [Přijaté faktury](17_Prijate_faktury.md)
+18. [Export přijatých](18_Export_prijatych.md)
+19. [AI extrakce](19_AI_extrakce.md)
 
-### Exporty pro účetní
+### Finance
 
-16. [Exporty (PDF ZIP, ISDOC, Pohoda XML)](16_Exporty.md)
-17. [Importy (Pohoda XML, ISDOC)](17_Importy.md)
+20. [CRM dashboard](20_CRM.md)
+21. [Tržby](21_Trzby.md)
+22. [Náklady](22_Naklady.md)
+23. [Banka](23_Banka.md)
+24. [Upomínky](24_Upominky.md)
 
-### Konfigurace
+### Dokumenty
 
-18. [Více dodavatelů z jedné instalace](18_Multi_supplier.md)
-19. [Nastavení (dodavatel, číselníky, uživatelé, e-mail šablony)](19_Nastaveni.md)
-20. [Bezpečnost (2FA, IP allowlist, role, activity log)](20_Bezpecnost.md)
-21. [Aktualizace na novou verzi](21_Aktualizace.md)
+25. [Dokumenty](25_Dokumenty.md)
+26. [Kniha jízd](26_Kniha_jizd.md)
 
-### Pokročilé
+### Daně
 
-22. [REST API (automatizace a integrace)](22_API.md)
-23. [CRM dashboard (revenue/costs/profit/aging/DSO)](23_CRM.md) — **nové ve v4.0.0**
-24. [Výkazy DPH (DPHDP3 + KH + SH)](24_Vykazy_DPH.md) — **nové ve v4.0.0**
-25. [Daň z příjmů (DPFO / DPPO)](25_Dan_z_prijmu.md) — **nové ve v4.0.0** (MVP foundation)
-26. [Dokumenty (úložiště souborů, ZFO, párování)](26_Dokumenty.md) — **nové**
+27. [Daňový průvodce](27_Fakturujeme.md)
+28. [Výkazy DPH](28_Vykazy_DPH.md)
+29. [Kniha DPH](29_Kniha_DPH.md)
+30. [Souhrnné hlášení](30_Souhrnne_hlaseni.md)
+31. [Daň z příjmů](31_Dan_z_prijmu.md)
+32. [Daňový optimalizátor](32_Danovy_optimalizator.md)
+33. [Hromadný export](33_Hromadny_export.md)
+
+### Systém
+
+34. [Více dodavatelů](34_Multi_supplier.md)
+35. [Nastavení](35_Nastaveni.md)
+36. [Bankovní účty](36_Bankovni_ucty.md)
+37. [Elektronické podpisy](37_Elektronicke_podpisy.md)
+38. [Bezpečnost](38_Bezpecnost.md)
+39. [Aktualizace](39_Aktualizace.md)
+40. [REST API](40_API.md)
 
 ### Reference
 
-99. [Řešení problémů (FAQ)](99_Reseni_problemu.md)
+99. [Řešení problémů](99_Reseni_problemu.md)

@@ -5,26 +5,30 @@ declare(strict_types=1);
 namespace MyInvoice\Service\Sample;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Repository\RecurringTemplateRepository;
 use MyInvoice\Service\Stats\StatsRecomputer;
 use PDO;
 
 /**
  * Generuje testovací sample data — 5 klientů, 8 zakázek, 20 faktur, 4 dobropisy,
- * 4 dodavatelé a 12 přijatých faktur.
+ * 4 dodavatelé, 12 přijatých faktur, 2 pravidelné fakturace a kniha jízd
+ * (1 firemní auto, 15 jízd, 6 tankování).
  * Sdílená logika pro `bin/sample.php` (CLI) i `SetupSampleAction` (HTTP wizard).
  *
  * Vrací: ['clients' => 5, 'projects' => 8, 'invoices' => 20, 'credit_notes' => 4,
- *         'vendors' => 4, 'purchase_invoices' => 12]
+ *         'vendors' => 4, 'purchase_invoices' => 12, 'recurring' => 2,
+ *         'cars' => 1, 'trips' => 15, 'fuelings' => 6]
  */
 final class SampleDataGenerator
 {
     public function __construct(
         private readonly Connection $db,
         private readonly StatsRecomputer $stats,
+        private readonly RecurringTemplateRepository $recurring,
     ) {}
 
     /**
-     * @return array{clients:int, projects:int, invoices:int, credit_notes:int, vendors:int, purchase_invoices:int}
+     * @return array{clients:int, projects:int, invoices:int, credit_notes:int, vendors:int, purchase_invoices:int, recurring:int, cars:int, trips:int, fuelings:int}
      */
     public function generate(int $supplierId, int $adminUserId): array
     {
@@ -44,10 +48,13 @@ final class SampleDataGenerator
         $czkId = $resolveCurrency('CZK');
         $eurId = $resolveCurrency('EUR');
 
+        // RC flag (index 8) daňově smysluplně: tuzemští klienti BEZ reverse charge
+        // (tuzemský RC §92a na IT služby neexistuje), EU klienti s DIČ (SK, DE)
+        // S reverse charge — poskytnutí služby do JČS (ř.21 DPHDP3, kód 22, SHV).
         $clients = [
-            ['ACME Czech s.r.o.',     '12345678', 'CZ12345678', 'Václavské náměstí 1',  '11000', 'Praha 1',  'CZ', 'invoice@acme.cz',     1, 'cs', $czkId, 'CZK'],
-            ['BlueWave Digital a.s.', '87654321', 'CZ87654321', 'Husova 23',            '60200', 'Brno',     'CZ', 'finance@bluewave.cz', 1, 'cs', $czkId, 'CZK'],
-            ['Bratislava Soft s.r.o.','46782931', 'SK2023456789','Mlynská 5',            '81101', 'Bratislava','SK', 'fakturace@bsoft.sk',  0, 'cs', $eurId, 'EUR'],
+            ['ACME Czech s.r.o.',     '12345678', 'CZ12345678', 'Václavské náměstí 1',  '11000', 'Praha 1',  'CZ', 'invoice@acme.cz',     0, 'cs', $czkId, 'CZK'],
+            ['BlueWave Digital a.s.', '87654321', 'CZ87654321', 'Husova 23',            '60200', 'Brno',     'CZ', 'finance@bluewave.cz', 0, 'cs', $czkId, 'CZK'],
+            ['Bratislava Soft s.r.o.','46782931', 'SK2023456789','Mlynská 5',            '81101', 'Bratislava','SK', 'fakturace@bsoft.sk',  1, 'cs', $eurId, 'EUR'],
             ['Studio Fialka',         null,       null,         'Nádražní 7',           '70030', 'Ostrava',  'CZ', 'jana@fialka.cz',      0, 'cs', $czkId, 'CZK'],
             ['NorthLight GmbH',       null,       'DE123456789','Hauptstrasse 12',      '10115', 'Berlin',   'DE', 'billing@northlight.de', 1, 'en', $eurId, 'EUR'],
         ];
@@ -93,6 +100,7 @@ final class SampleDataGenerator
         $prevMonth = $today->modify('-1 month')->format('Y-m');
 
         $stdVat = (int) $pdo->query("SELECT id FROM vat_rates WHERE code = 'CZ-21' LIMIT 1")->fetchColumn();
+        $lowVat = (int) $pdo->query("SELECT id FROM vat_rates WHERE code = 'CZ-12' LIMIT 1")->fetchColumn();
         $rcVat  = (int) $pdo->query("SELECT id FROM vat_rates WHERE code = 'CZ-RC' LIMIT 1")->fetchColumn();
 
         $invoices = [];
@@ -134,9 +142,9 @@ final class SampleDataGenerator
                 'INSERT INTO invoices
                     (supplier_id, varsymbol, invoice_type, client_id, project_id, issue_date, tax_date, due_date,
                      currency_id, exchange_rate, exchange_rate_date,
-                     reverse_charge, language, total_without_vat, total_vat, total_with_vat,
+                     reverse_charge, language, vat_classification_code, total_without_vat, total_vat, total_with_vat,
                      status, sent_at, paid_at, created_by)
-                 VALUES (?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)'
+                 VALUES (?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)'
             );
             $sentAt = in_array($status, ['sent', 'paid'], true) ? $issueDate . ' 14:00:00' : null;
             $paidAt = $status === 'paid'
@@ -146,7 +154,11 @@ final class SampleDataGenerator
                 $supplierId, $vs, $clientIds[$clientIdx], $projectId, $issueDate, $taxDate, $dueDate,
                 $clientCurrencyId, $exchangeRate, $exchangeRate !== null ? $issueDate : null,
                 $clientReverseCharge ? 1 : 0,
-                $clients[$clientIdx][9], $status, $sentAt, $paidAt, $adminUserId,
+                $clients[$clientIdx][9],
+                // EU RC = poskytnutí služby do JČS → kód 22 (ř.21 DPHDP3 + SHV);
+                // tuzemské nechávat bez kódu (fallback dle sazby → ř.1, KH A.4/A.5).
+                $clientReverseCharge ? '22' : null,
+                $status, $sentAt, $paidAt, $adminUserId,
             ]);
             $invId = (int) $pdo->lastInsertId();
             $invoices[] = ['id' => $invId, 'vs' => $vs, 'currency' => $clientCurrency, 'currency_id' => $clientCurrencyId, 'rc' => $clientReverseCharge];
@@ -157,7 +169,7 @@ final class SampleDataGenerator
                 $hours = random_int(2, 40);
                 $rate = $clientCurrency === 'EUR' ? random_int(60, 100) : random_int(1200, 2000);
                 $base = $hours * $rate;
-                $vatAmt = $clientReverseCharge ? 0 : round($base * 0.21, 2);
+                $vatAmt = round($base * $vatPct / 100, 2); // RC má vatPct 0 → daň 0
                 $totalBase += $base;
                 $totalVat  += $vatAmt;
 
@@ -205,9 +217,9 @@ final class SampleDataGenerator
                 'INSERT INTO invoices
                     (supplier_id, varsymbol, invoice_type, parent_invoice_id, client_id, project_id,
                      issue_date, tax_date, due_date, currency_id, exchange_rate, exchange_rate_date,
-                     reverse_charge, language,
+                     reverse_charge, language, vat_classification_code,
                      total_without_vat, total_vat, total_with_vat, status, sent_at, created_by)
-                 VALUES (?, ?, "credit_note", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sent", ?, ?)'
+                 VALUES (?, ?, "credit_note", ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "sent", ?, ?)'
             );
             $stmt->execute([
                 $supplierId, $vs, $p['id'], $p['client_id'], $p['project_id'],
@@ -216,6 +228,7 @@ final class SampleDataGenerator
                 $p['exchange_rate'] ?? null,
                 $p['exchange_rate'] !== null ? $issueDate : null,
                 $p['reverse_charge'], $p['language'],
+                $p['vat_classification_code'] ?? null, // dobropis dědí klasifikaci originálu
                 -$p['total_without_vat'], -$p['total_vat'], -$p['total_with_vat'],
                 $issueDate . ' 12:00:00', $adminUserId,
             ]);
@@ -237,11 +250,36 @@ final class SampleDataGenerator
         }
 
         // ───── Dodavatelé (is_vendor=1, is_customer=0) ─────
+        // Daňově smysluplné profily: US dodavatelé služeb = reverse charge
+        // (samovyměření, kód 24 → ř.12 + mirror odpočet ř.43, jako reálný
+        // GitHub/Anthropic doklad), tuzemští = česká DPH (kód 40/41, KH B.2/B.3).
         $vendors = [
             ['Anthropic, PBC',          null,        null,         '548 Market St #79290',  '94104', 'San Francisco', 'US', 'billing@anthropic.com', $eurId, 'EUR'],
             ['Microsoft Czech s.r.o.',  '47123737',  'CZ47123737', 'Vyskočilova 1561/4a',   '14000', 'Praha 4',       'CZ', 'fakturace@microsoft.cz', $czkId, 'CZK'],
             ['GitHub, Inc.',            null,        null,         '88 Colin P Kelly Jr St', '94107', 'San Francisco', 'US', 'billing@github.com',    $eurId, 'EUR'],
             ['Office Pro s.r.o.',       '28765432',  'CZ28765432', 'Korunní 810/104',        '10100', 'Praha 10',     'CZ', 'fakturace@officepro.cz', $czkId, 'CZK'],
+        ];
+        // Per-vendor: RC flag + pool položek [popis, sazba %, klasifikační kód].
+        // RC položky nesou nominální sazbu 21 s daní 0 (samovyměření dopočítají
+        // až DPH výkazy z rate snapshotu — stejný model jako AI import / editor).
+        $vendorItemPools = [
+            'Anthropic, PBC' => ['rc' => true, 'items' => [
+                ['Claude API kredity', 21, '24'],
+                ['Claude Max — měsíční předplatné', 21, '24'],
+            ]],
+            'GitHub, Inc.' => ['rc' => true, 'items' => [
+                ['GitHub Copilot — předplatné', 21, '24'],
+                ['GitHub Team — roční plán', 21, '24'],
+            ]],
+            'Microsoft Czech s.r.o.' => ['rc' => false, 'items' => [
+                ['Microsoft 365 Business Premium — licence', 21, '40'],
+                ['Azure — cloud služby', 21, '40'],
+            ]],
+            'Office Pro s.r.o.' => ['rc' => false, 'items' => [
+                ['Kancelářské potřeby', 21, '40'],
+                ['Odborná literatura', 12, '41'],
+                ['Papír a tonery do tiskárny', 21, '40'],
+            ]],
         ];
         $vendorIds = [];
         $vendorMeta = [];
@@ -297,44 +335,49 @@ final class SampleDataGenerator
             ], JSON_UNESCAPED_UNICODE);
 
             $exchangeRate = $v['currency'] === 'CZK' ? null : 25.0;
+            $pool = $vendorItemPools[$v['company']];
+            $isRc = $pool['rc'];
 
             $stmt = $pdo->prepare(
                 'INSERT INTO purchase_invoices
                     (supplier_id, vendor_id, varsymbol, vendor_invoice_number, document_kind,
                      issue_date, tax_date, due_date, received_at, currency_id, exchange_rate, exchange_rate_date,
-                     exchange_rate_source, reverse_charge, language, vendor_snapshot,
+                     exchange_rate_source, reverse_charge, language, vendor_snapshot, vat_classification_code,
                      total_without_vat, total_vat, total_with_vat, status, booked_at, paid_at, created_by)
-                 VALUES (?, ?, ?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, "cnb", 0, "cs", ?, 0, 0, 0, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, "invoice", ?, ?, ?, ?, ?, ?, ?, "cnb", ?, "cs", ?, ?, 0, 0, 0, ?, ?, ?, ?)'
             );
             $stmt->execute([
                 $supplierId, $v['id'], $vs, $vendorInvoiceNumber,
                 $issueDate, $taxDate, $dueDate, $receivedAt,
                 $v['currency_id'], $exchangeRate, $exchangeRate !== null ? $issueDate : null,
-                $vendorSnapshot, $status, $bookedAt, $paidAt, $adminUserId,
+                $isRc ? 1 : 0,
+                $vendorSnapshot,
+                $isRc ? '24' : null, // dovoz služby (ř.12 + mirror ř.43); tuzemsko per položka
+                $status, $bookedAt, $paidAt, $adminUserId,
             ]);
             $piId = (int) $pdo->lastInsertId();
 
-            // 1-3 položky
-            $itemCount = random_int(1, 3);
+            // 1-3 položky z vendor poolu (popis + sazba + klasifikace k sobě patří)
+            $itemCount = random_int(1, min(3, count($pool['items'])));
             $totalBase = 0; $totalVat = 0;
             for ($k = 0; $k < $itemCount; $k++) {
+                [$description, $ratePct, $clsCode] = $pool['items'][($i + $k) % count($pool['items'])];
                 $qty  = random_int(1, 5);
                 $rate = $v['currency'] === 'CZK' ? random_int(500, 5000) : random_int(20, 200);
                 $base = $qty * $rate;
-                $vatAmt = round($base * 0.21, 2);
+                // RC: nominální sazba zůstává, daň 0 (samovyměří se až ve výkazech)
+                $vatAmt = $isRc ? 0.0 : round($base * $ratePct / 100, 2);
                 $totalBase += $base; $totalVat += $vatAmt;
-                $description = match ($k) {
-                    0 => 'API kredity / cloud služby',
-                    1 => 'Software licence',
-                    default => 'Konzultace / podpora',
-                };
                 $pdo->prepare(
                     'INSERT INTO purchase_invoice_items
                         (purchase_invoice_id, description, quantity, unit, unit_price_without_vat,
-                         vat_rate_id, vat_rate_snapshot, total_without_vat, total_vat, total_with_vat, order_index)
-                     VALUES (?,?,?,"ks",?,?,21.00,?,?,?,?)'
+                         vat_rate_id, vat_rate_snapshot, total_without_vat, total_vat, total_with_vat,
+                         vat_classification_code, order_index)
+                     VALUES (?,?,?,"ks",?,?,?,?,?,?,?,?)'
                 )->execute([
-                    $piId, $description, $qty, $rate, $stdVat, $base, $vatAmt, $base + $vatAmt, $k,
+                    $piId, $description, $qty, $rate,
+                    $ratePct >= 21 ? $stdVat : $lowVat, $ratePct,
+                    $base, $vatAmt, $base + $vatAmt, $clsCode, $k,
                 ]);
             }
             $totalWithVat = $totalBase + $totalVat;
@@ -343,6 +386,66 @@ final class SampleDataGenerator
             )->execute([$totalBase, $totalVat, $totalWithVat, $piId]);
             $purchaseCount++;
         }
+
+        // ───── Pravidelné fakturace (2 šablony) ─────
+        // Vystavení od 1. dne příštího měsíce (ať cron hned něco negeneruje a uživatel
+        // si je v klidu prohlédne). Přes RecurringTemplateRepository (stejné defaulty jako UI).
+        $firstNextMonth = $today->modify('first day of next month')->format('Y-m-d');
+        $recurringTemplates = [
+            [
+                'client_idx' => 0, 'project_idx' => 0, 'currency_id' => $czkId,
+                'name' => 'Měsíční hosting a údržba webu', 'frequency' => 'monthly',
+                'language' => 'cs', 'rc' => 0, 'vat' => $stdVat,
+                'items' => [
+                    ['Webhosting + správa serveru', 2500.0],
+                    ['Údržba webu (měsíční paušál)', 3500.0],
+                ],
+            ],
+            [
+                'client_idx' => 4, 'project_idx' => 7, 'currency_id' => $eurId,
+                'name' => 'Quarterly support retainer', 'frequency' => 'quarterly',
+                'language' => 'en', 'rc' => 1, 'vat' => $rcVat,
+                'items' => [
+                    ['Quarterly support & maintenance retainer', 1200.0],
+                ],
+            ],
+        ];
+        $recurringCount = 0;
+        foreach ($recurringTemplates as $rt) {
+            $tplId = $this->recurring->create([
+                'supplier_id'     => $supplierId,
+                'client_id'       => $clientIds[$rt['client_idx']],
+                'project_id'      => $projectIds[$rt['project_idx']],
+                'name'            => $rt['name'],
+                'frequency'       => $rt['frequency'],
+                'day_of_month'    => 1,
+                'anchor_date'     => $firstNextMonth,
+                'invoice_type'    => 'invoice',
+                'currency_id'     => $rt['currency_id'],
+                'language'        => $rt['language'],
+                'reverse_charge'  => $rt['rc'],
+                'payment_due_days' => 14,
+                'auto_issue'      => 1,
+                'auto_send_email' => 0,  // sample: negenerovat reálné e-maily
+                'status'          => 'active',
+            ], $adminUserId);
+            $this->recurring->replaceItems($tplId, array_map(
+                fn (array $it, int $k) => [
+                    'description'            => $it[0],
+                    'quantity'               => 1,
+                    'unit'                   => 'ks',
+                    'unit_price_without_vat' => $it[1],
+                    'vat_rate_id'            => $rt['vat'],
+                    'order_index'            => $k,
+                ],
+                $rt['items'],
+                array_keys($rt['items']),
+            ));
+            $recurringCount++;
+        }
+
+        // ───── Kniha jízd (1 firemní auto, 15 jízd, 6 tankování) ─────
+        $logbook = $this->seedLogbook($pdo, $supplierId, $adminUserId, $today);
 
         // Sample data nejdou přes InvoiceActions, takže project/client revenue cache by zůstaly prázdné
         // → dashboard a top-clients koláč by hlásily nulu. Recompute všech vygenerovaných entit.
@@ -357,7 +460,122 @@ final class SampleDataGenerator
             'credit_notes'      => 4,
             'vendors'           => count($vendorIds),
             'purchase_invoices' => $purchaseCount,
+            'recurring'         => $recurringCount,
+            'cars'              => $logbook['cars'],
+            'trips'             => $logbook['trips'],
+            'fuelings'          => $logbook['fuelings'],
         ];
+    }
+
+    /**
+     * Kniha jízd — 1 firemní auto, 15 jízd a 6 tankování za poslední ~2 měsíce.
+     * Evidenční vrstva (do DPH/statistik/dashboardů NEvstupuje), proto stačí přímé
+     * inserty. Odometer řetězíme spojitě od počátečního stavu auta, tankování
+     * umisťujeme do téhož rozsahu km, ať na sebe přehledy a souhrny sedí.
+     *
+     * @return array{cars:int, trips:int, fuelings:int}
+     */
+    private function seedLogbook(PDO $pdo, int $supplierId, int $adminUserId, \DateTimeImmutable $today): array
+    {
+        // ── Auto (výchozí, firemní) ──
+        $odometerStart = 85000;
+        $startDate = $today->modify('-2 months')->modify('first day of this month')->format('Y-m-d');
+        $pdo->prepare(
+            'INSERT INTO cars (supplier_id, registration, name, brand, model, vin, fuel_type,
+                               odometer_start, odometer_start_date, is_default, is_archived, note, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, "diesel", ?, ?, 1, 0, NULL, ?)'
+        )->execute([
+            $supplierId, '5AB 1234', 'Octavia firemní', 'Škoda', 'Octavia Combi 2.0 TDI',
+            'TMBJJ7NE5L0123456', $odometerStart, $startDate, $adminUserId,
+        ]);
+        $carId = (int) $pdo->lastInsertId();
+
+        // Kategorie cest (business/private) určují daňovou relevanci jízdy. Migrace 0109 je
+        // seeduje per supplier, ale při fresh installu běží PŘED vznikem supplieru (a setup je
+        // neseeduje) → nový tenant je nemá. Idempotentně je proto zajistíme tady; ON DUPLICATE
+        // + LAST_INSERT_ID(id) vrátí id existující řádky bez přepsání případné úpravy uživatele.
+        $ensureCat = function (string $code, string $label, int $isPrivate, int $order) use ($pdo, $supplierId): int {
+            $pdo->prepare(
+                'INSERT INTO trip_categories (supplier_id, code, label, is_private, display_order)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)'
+            )->execute([$supplierId, $code, $label, $isPrivate, $order]);
+            return (int) $pdo->lastInsertId();
+        };
+        $catBusiness = $ensureCat('business', 'Služební', 0, 10);
+        $catPrivate  = $ensureCat('private', 'Soukromá', 1, 20);
+
+        // ── 15 jízd (chronologicky; odometer se řetězí spojitě) ──
+        // [dní zpět, čas od, čas do, odkud, kam, účel, km, soukromá?]
+        $tripDefs = [
+            [68, '08:15', '11:40', 'Praha', 'Brno',            'Schůzka s klientem BlueWave Digital', 205, false],
+            [66, '15:00', '18:20', 'Brno', 'Praha',            'Návrat z jednání',                    205, false],
+            [60, '09:00', '10:35', 'Praha', 'Plzeň',           'Instalace u zákazníka',                95, false],
+            [60, '16:10', '17:45', 'Plzeň', 'Praha',           'Návrat z instalace',                   95, false],
+            [54, '10:30', '11:25', 'Praha', 'Kolín',           'Konzultace IT infrastruktury',         65, false],
+            [50, '08:40', '10:30', 'Praha', 'Hradec Králové',  'Školení zaměstnanců klienta',         115, false],
+            [49, '14:00', '15:50', 'Hradec Králové', 'Praha',  'Návrat ze školení',                   115, false],
+            [44, '11:15', '11:55', 'Praha', 'Benešov',         'Servis serveru u zákazníka',           40, false],
+            [40, '07:50', '09:35', 'Praha', 'Liberec',         'Obchodní jednání — nová zakázka',     105, false],
+            [39, '17:20', '19:05', 'Liberec', 'Praha',         'Návrat z jednání',                    105, false],
+            [32, '09:30', '11:30', 'Praha', 'Karlovy Vary',    'Soukromá cesta',                      130, true],
+            [31, '18:00', '20:00', 'Karlovy Vary', 'Praha',    'Soukromá cesta — návrat',             130, true],
+            [24, '08:25', '10:25', 'Praha', 'Pardubice',       'Předání hotové zakázky',              125, false],
+            [16, '07:30', '11:00', 'Praha', 'Olomouc',         'Konference — prezentace řešení',      280, false],
+            [6,  '13:10', '13:45', 'Praha', 'Kladno',          'Nákup HW vybavení',                    30, false],
+        ];
+
+        $tripStmt = $pdo->prepare(
+            'INSERT INTO trips (supplier_id, car_id, trip_date, time_start, time_end,
+                                odometer_start, odometer_end, distance_km, category_id,
+                                purpose, origin, destination, note, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)'
+        );
+        $odometer = $odometerStart;
+        $tripsCount = 0;
+        foreach ($tripDefs as [$daysBack, $timeStart, $timeEnd, $origin, $destination, $purpose, $km, $isPrivate]) {
+            $odoStart = $odometer;
+            $odoEnd   = $odometer + $km;
+            $odometer = $odoEnd;
+            $tripStmt->execute([
+                $supplierId, $carId, $today->modify("-{$daysBack} days")->format('Y-m-d'),
+                $timeStart, $timeEnd, $odoStart, $odoEnd, $km,
+                $isPrivate ? $catPrivate : $catBusiness,
+                $purpose, $origin, $destination, $adminUserId,
+            ]);
+            $tripsCount++;
+        }
+
+        // ── 6 tankování (nafta; odometer ve stejném rozsahu km jako jízdy) ──
+        // [dní zpět, čas, stanice, litry, cena/l vč. DPH, odometer]
+        $fuelDefs = [
+            [67, '07:55', 'Praha-Zličín / Shell',       48.62, 35.90, 85200],
+            [58, '08:30', 'Plzeň, Borská / OMV',        45.18, 36.40, 85560],
+            [46, '12:05', 'Praha, Strašnice / EuroOil', 50.07, 35.50, 85930],
+            [36, '07:40', 'Liberec / Benzina',          47.83, 37.10, 86250],
+            [22, '09:15', 'Pardubice / MOL',            49.34, 36.80, 86560],
+            [5,  '13:20', 'Praha-Zličín / Shell',       44.57, 38.20, 86790],
+        ];
+
+        $fuelStmt = $pdo->prepare(
+            'INSERT INTO fuelings (supplier_id, car_id, fueled_date, fueled_time, fuel_type, quantity, unit,
+                                   unit_price, amount_without_vat, amount_vat, amount_with_vat, currency,
+                                   odometer, station, source, created_by)
+             VALUES (?, ?, ?, ?, "Nafta", ?, "l", ?, ?, ?, ?, "CZK", ?, ?, "manual", ?)'
+        );
+        $fuelingsCount = 0;
+        foreach ($fuelDefs as [$daysBack, $time, $station, $liters, $pricePerL, $odo]) {
+            $withVat    = round($liters * $pricePerL, 2);
+            $withoutVat = round($withVat / 1.21, 2);
+            $vat        = round($withVat - $withoutVat, 2);
+            $fuelStmt->execute([
+                $supplierId, $carId, $today->modify("-{$daysBack} days")->format('Y-m-d'), $time,
+                $liters, $pricePerL, $withoutVat, $vat, $withVat, $odo, $station, $adminUserId,
+            ]);
+            $fuelingsCount++;
+        }
+
+        return ['cars' => 1, 'trips' => $tripsCount, 'fuelings' => $fuelingsCount];
     }
 
     private function nextPurchaseVarsymbol(PDO $pdo, int $supplierId, string $period): string

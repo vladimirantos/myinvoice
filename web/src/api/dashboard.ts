@@ -163,10 +163,24 @@ export interface RevenueCategoryBreakdownItem {
   percent: number
 }
 
+export interface DraftInvoiceItem {
+  id: number
+  varsymbol: string | null
+  invoice_type: string
+  client_id: number
+  client_company_name: string
+  project_id: number | null
+  project_name: string | null
+  currency: string
+  issue_date: string
+  total_with_vat: number
+}
+
 export interface DashboardSummary {
   kpi: DashboardKpi
   overdue: DashboardInvoiceItem[]
   unpaid_upcoming: DashboardInvoiceItem[]
+  draft_invoices: DraftInvoiceItem[]
   top_clients_ytd: TopClient[]
   top_clients_prev_year: TopClient[]
   top_clients_12m: TopClient[]

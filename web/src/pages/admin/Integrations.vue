@@ -393,7 +393,8 @@ function onAiDrop(e: DragEvent) {
   if (files.length === 0) return
 
   const pdfs = files.filter(f =>
-    f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
+    f.type === 'application/pdf' || f.type.startsWith('image/') ||
+    /\.(pdf|jpe?g|png|webp|heic|heif|gif|bmp|isdoc|isdocx)$/i.test(f.name))
   if (pdfs.length === 0) {
     toast.error(t('integrations.ai.only_pdf'))
     return
@@ -845,7 +846,19 @@ onUnmounted(() => {
     </div>
 
     <!-- ════ AI extrakce (Anthropic Claude) ════ -->
-    <div v-else-if="tab === 'ai'" class="space-y-4">
+    <!-- #97: když je AI nakonfigurované, je opakovaná akce (extrakce) primární → flex
+         `order` ji vysune nad konfiguraci, kterou sbalíme do collapsible „Nastavení AI". -->
+    <div v-else-if="tab === 'ai'" class="flex flex-col gap-4">
+      <!-- Konfigurace AI: onboarding (rozbalené) když není nakonfig.; jinak sbalené a pod plochou. -->
+      <details :open="!aiStatus?.configured"
+               :class="['group space-y-4', aiStatus?.configured ? 'order-2' : 'order-1']">
+        <summary class="cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden inline-flex items-center gap-2 px-3 py-2 rounded-md border border-neutral-200 bg-neutral-50 text-sm font-medium text-neutral-700 hover:bg-neutral-100">
+          <svg class="w-4 h-4 text-neutral-400 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+          <span>{{ t('integrations.ai.settings_title') }}</span>
+          <span v-if="aiStatus?.configured" class="ml-1 font-mono text-xs font-normal text-success-600">✓ {{ aiStatus.default_model }}</span>
+        </summary>
       <!-- Privacy notice: PDF data se odesílá na servery Anthropic. -->
       <div class="rounded-md bg-warning-50 border border-warning-500/40 px-4 py-3 text-sm text-warning-700">
         <div class="flex gap-2 items-start">
@@ -918,9 +931,10 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+      </details>
 
-      <!-- AI PDF extract -->
-      <div v-if="aiStatus?.configured" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <!-- AI PDF extract (primární akce — jen když je nakonfigurováno; #97 nad konfigurací) -->
+      <div v-if="aiStatus?.configured" class="order-1 bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-medium text-neutral-700 mb-2">{{ t('integrations.ai.extract_title') }}</h2>
         <p class="text-xs text-neutral-500 mb-4">{{ t('integrations.ai.extract_hint') }}</p>
 
@@ -930,7 +944,7 @@ onUnmounted(() => {
               ? 'border-primary-500 bg-primary-50'
               : 'border-neutral-300 hover:border-primary-400 hover:bg-primary-50/30'"
             @dragenter="onAiDragEnter" @dragover="onAiDragOver" @dragleave="onAiDragLeave" @drop="onAiDrop">
-            <input type="file" accept="application/pdf,.pdf" @change="onAiPdfPick" class="hidden" />
+            <input type="file" accept="application/pdf,.pdf,image/*,.isdoc,.isdocx" @change="onAiPdfPick" class="hidden" />
             <svg class="w-8 h-8 mx-auto text-neutral-400 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
               <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 0 1-.88-7.9 5 5 0 0 1 9.9-1A5.5 5.5 0 0 1 18.5 16H17m-5-4v9m0-9l-3 3m3-3l3 3" />
             </svg>

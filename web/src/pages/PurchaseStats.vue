@@ -187,7 +187,8 @@ const hasAnyData = computed(() =>
 
         <!-- Náklady tento rok per měna -->
         <div v-for="r in costsThisYear" :key="`ty-${r.currency}`"
-          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+          @click="$router.push({ path: '/purchase-invoices', query: { year: String(summary.year), currency: r.currency } })"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm cursor-pointer hover:border-primary-300 transition">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">
             {{ t('costs.costs_this_year', { year: summary.year, currency: r.currency }) }}
           </div>
@@ -240,18 +241,20 @@ const hasAnyData = computed(() =>
         </div>
 
         <!-- Počet přijatých faktur YTD -->
-        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <RouterLink :to="{ path: '/purchase-invoices', query: { year: String(summary.year) } }"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm hover:border-primary-300 transition block">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">{{ t('costs.purchases_count_ytd', { year: summary.year }) }}</div>
           <div class="text-2xl font-semibold text-neutral-900">{{ summary.kpi.purchase_count_ytd }}</div>
           <div class="text-xs text-neutral-400 mt-1">{{ t('costs.invoices_unit') }}</div>
-        </div>
+        </RouterLink>
 
         <!-- Aktivní dodavatelé -->
-        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <RouterLink to="/clients"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm hover:border-primary-300 transition block">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">{{ t('costs.active_vendors') }}</div>
           <div class="text-2xl font-semibold text-neutral-900">{{ summary.active_vendors_count }}</div>
           <div class="text-xs text-neutral-400 mt-1">{{ t('costs.active_vendors_hint') }}</div>
-        </div>
+        </RouterLink>
 
         <!-- Ø doba úhrady dodavatelům -->
         <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
@@ -274,7 +277,7 @@ const hasAnyData = computed(() =>
         </div>
 
         <!-- Nezaplacené závazky -->
-        <RouterLink to="/purchase-invoices"
+        <RouterLink :to="{ path: '/purchase-invoices', query: { unpaid: '1' } }"
           class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm hover:bg-neutral-50 transition cursor-pointer block">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">{{ t('costs.unpaid_payables') }}</div>
           <div class="text-2xl font-semibold" :class="summary.kpi.overdue_count > 0 ? 'text-danger-500' : 'text-neutral-900'">

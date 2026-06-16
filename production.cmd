@@ -8,7 +8,7 @@ REM   2. backup api/vendor (rename na vendor.dev.bak) + z?skat produkcni vendor:
 REM        - cache hit (api/vendor.prod existuje, hash composer.lock sedi) = rename (instant)
 REM        - cache miss = composer install --no-dev (30-60s) + ulozit hash
 REM   3. php tools/generateManualHtml.php (HTML manu?l do manual/generated/)
-REM      php tools/exportManualToPdf.php   (PDF manu?l do manual/manual.pdf)
+REM      pwsh tools/export-pdf.ps1         (PDF manu?l do manual/manual.pdf, MD2PDF combine)
 REM   4. push na production remote vc. web/dist + manual/generated + manual/manual.pdf + api/vendor
 REM   5. cachovat: rename api/vendor -^> api/vendor.prod (pro pristi deploy)
 REM      stash web/dist + manual/generated + manual/manual.pdf do *.bak (preserve pres `git checkout master`)
@@ -109,9 +109,10 @@ if !CACHE_HIT!==1 (
 
 REM ====== 3. Manual HTML + PDF build ======
 echo.
-echo === Smazani stareho manual/generated (fresh HTML) ===
-if exist manual\generated rmdir /s /q manual\generated
-if exist manual\manual.pdf del /q manual\manual.pdf
+REM manual/generated se NEMAZE rucne — generateManualHtml.php sam unlinkne stara
+REM *.html a prepise _toc.php + search-index.json (fresh rebuild). export-pdf.ps1
+REM (MD2PDF combine engine) prepise manual.pdf. Drivejsi `rmdir`/`del` jen zbytecne
+REM padaly na file-locku, kdyz mel AV (Defender) / editor otevreny handle na souboru.
 
 echo === Generate manual HTML ===
 php tools\generateManualHtml.php
@@ -120,8 +121,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo === Generate manual PDF ===
-php tools\exportManualToPdf.php
+REM Manual PDF: sdileny MD2PDF engine (combine rezim) pres tools\export-pdf.ps1.
+REM Engine se hleda v %MD2PDF_HOME%, jinak C:\work\MD2PDF. Vyzaduje PowerShell 7 (pwsh).
+echo === Generate manual PDF ^(MD2PDF combine^) ===
+where pwsh >nul 2>nul
+if errorlevel 1 (
+    set "PWSH=C:\bin64\PowerShell\7\pwsh.exe"
+) else (
+    set "PWSH=pwsh"
+)
+"!PWSH!" -NoProfile -ExecutionPolicy Bypass -File tools\export-pdf.ps1
 if errorlevel 1 (
     echo [ABORT] manual PDF export selhal.
     exit /b 1
@@ -172,10 +181,14 @@ REM Stash web/dist a manual/generated mimo working tree, jinak je `git checkout 
 REM smaze (tracked v deploy-temp, untracked v master) a museli bychom je rebuildovat.
 echo.
 echo === Stash web/dist + manual/generated + manual.pdf pred checkout master ===
+REM robocopy /MOVE /R:15 /W:1 misto `move` — pokud ma AV (Defender) / editor kratce
+REM otevreny handle na cerstve vygenerovanem souboru, `move` hned spadne a nasledny
+REM `git checkout master` pak visi na "Deletion of directory failed. Try again? (y/n)".
+REM robocopy zamek prepocka (az 15x 1s). Zdrojova slozka se po MOVE smaze.
 if exist web\dist.bak rmdir /s /q web\dist.bak
-if exist web\dist move web\dist web\dist.bak >nul
+if exist web\dist robocopy web\dist web\dist.bak /MOVE /E /R:15 /W:1 /NFL /NDL /NJH /NJS /NP >nul
 if exist manual\generated.bak rmdir /s /q manual\generated.bak
-if exist manual\generated move manual\generated manual\generated.bak >nul
+if exist manual\generated robocopy manual\generated manual\generated.bak /MOVE /E /R:15 /W:1 /NFL /NDL /NJH /NJS /NP >nul
 if exist manual\manual.pdf.bak del /q manual\manual.pdf.bak
 if exist manual\manual.pdf move manual\manual.pdf manual\manual.pdf.bak >nul
 

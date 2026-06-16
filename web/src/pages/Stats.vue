@@ -284,7 +284,8 @@ const hasAnyData = computed(() =>
 
         <!-- Obrat tento rok per měna -->
         <div v-for="r in revenueThisYear" :key="`ty-${r.currency}`"
-          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+          @click="$router.push({ path: '/invoices', query: { year: String(summary.year), currency: r.currency } })"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm cursor-pointer hover:border-primary-300 transition">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">
             {{ t('stats.revenue_this_year', { year: summary.year, currency: r.currency }) }}
           </div>
@@ -347,18 +348,20 @@ const hasAnyData = computed(() =>
         </div>
 
         <!-- Počet vystavených faktur YTD -->
-        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <RouterLink :to="{ path: '/invoices', query: { year: String(summary.year) } }"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm hover:border-primary-300 transition block">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">{{ t('stats.invoices_count_ytd', { year: summary.year }) }}</div>
           <div class="text-2xl font-semibold text-neutral-900">{{ summary.kpi.issued_count_ytd }}</div>
           <div class="text-xs text-neutral-400 mt-1">{{ t('dashboard.invoices_unit') }}</div>
-        </div>
+        </RouterLink>
 
         <!-- Počet aktivních klientů -->
-        <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <RouterLink to="/clients"
+          class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm hover:border-primary-300 transition block">
           <div class="text-xs uppercase tracking-wide text-neutral-500 mb-1">{{ t('stats.active_clients') }}</div>
           <div class="text-2xl font-semibold text-neutral-900">{{ summary.active_clients_count }}</div>
           <div class="text-xs text-neutral-400 mt-1">{{ t('stats.active_clients_hint') }}</div>
-        </div>
+        </RouterLink>
 
         <!-- Ø doba úhrady -->
         <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">

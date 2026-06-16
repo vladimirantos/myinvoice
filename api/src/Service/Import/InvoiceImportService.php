@@ -9,6 +9,7 @@ use MyInvoice\Repository\InvoiceRepository;
 use MyInvoice\Repository\ProjectRepository;
 use MyInvoice\Service\Invoice\InvoiceCalculator;
 use MyInvoice\Service\Invoice\SnapshotBuilder;
+use MyInvoice\Service\Invoice\VarsymbolGenerator;
 use ZipArchive;
 
 /**
@@ -45,6 +46,7 @@ final class InvoiceImportService
         private readonly SnapshotBuilder $snapshots,
         private readonly InvoiceCalculator $calculator,
         private readonly IsdocToPurchaseInvoiceMapper $purchaseMapper,
+        private readonly VarsymbolGenerator $varsymbol,
     ) {}
 
     /**
@@ -77,6 +79,20 @@ final class InvoiceImportService
         // 1. Rozbalení ZIPů na ploché soubory.
         $flat = [];
         foreach ($files as $f) {
+            // ISDOCX balíček (ZIP s .isdoc + PDF + manifest) → vytáhni vnitřní .isdoc.
+            // Musí předcházet obecnému isZip(): jinak by se rozbalil jako bundle a
+            // manifest.xml / PDF by dělaly šum. PDF z balíčku batch import nearchivuje
+            // (stejně jako u holého .isdoc); pro náhled slouží upload přes AI/dropzone.
+            if ($this->isIsdocx($f['name'], $f['content'])) {
+                $pkg = (new IsdocxExtractor())->unwrap($f['content']);
+                if ($pkg !== null) {
+                    $flat[] = ['name' => $f['name'] . '/' . $pkg['isdoc_name'], 'content' => $pkg['isdoc']];
+                } else {
+                    // Nepodařilo se rozbalit → necháme na parseRaw čitelnou chybu.
+                    $flat[] = $f;
+                }
+                continue;
+            }
             if ($this->isZip($f['name'], $f['content'])) {
                 foreach ($this->unzip($f['content']) as $sub) {
                     $flat[] = ['name' => $f['name'] . '/' . $sub['name'], 'content' => $sub['content']];
@@ -102,6 +118,9 @@ final class InvoiceImportService
         $created = 0;
         $skipped = 0;
         $failed = 0;
+        // Scopes vydaných faktur, jejichž číselné řady je po importu třeba dorovnat
+        // (counter pozadu za historickými čísly). Klíč = typ|client|datum (idempotentní).
+        $counterScopes = [];
 
         foreach ($parsed as $entry) {
             if (isset($entry['error'])) {
@@ -132,13 +151,37 @@ final class InvoiceImportService
                     // Přidej kind do response pro UI
                     $r['kind'] = $route === 'issued' || $route === 'purchase' ? $route : null;
                     $results[] = ['file' => $label, 'status' => $r['status']] + $r;
-                    if ($r['status'] === 'created') $created++;
+                    if ($r['status'] === 'created') {
+                        $created++;
+                        if ($route === 'issued') {
+                            $type = (string) ($inv['invoice_type'] ?? 'invoice');
+                            $cli  = (int) ($r['client_id'] ?? 0);
+                            $date = (string) ($inv['issue_date'] ?? '');
+                            $counterScopes[$type . '|' . $cli . '|' . $date] = [$type, $cli, $date];
+                        }
+                    }
                     elseif ($r['status'] === 'skipped') $skipped++;
                     else $failed++;
                 } catch (\Throwable $e) {
                     $results[] = ['file' => $label, 'status' => 'failed', 'reason' => $e->getMessage()];
                     $failed++;
                 }
+            }
+        }
+
+        // Dorovnání číselných řad po importu vydaných faktur: counter se posune za
+        // nejvyšší importované číslo odpovídající aktuálnímu template (jinak no-op).
+        // Selhání syncu nesmí shodit import — jen se přeskočí (generátor je i tak
+        // duplicate-aware při dalším vystavení).
+        foreach ($counterScopes as [$type, $cli, $date]) {
+            if (!in_array($type, ['invoice', 'proforma', 'credit_note'], true)) {
+                continue;
+            }
+            try {
+                $for = $date !== '' ? new \DateTimeImmutable($date) : null;
+                $this->varsymbol->syncCounter($supplierId, $type, $for, $cli);
+            } catch (\Throwable) {
+                // ignore — best-effort dorovnání
             }
         }
 
@@ -538,8 +581,21 @@ final class InvoiceImportService
         return (string) $ic;
     }
 
+    /**
+     * ISDOCX balíček (ISDOC Package) — ZIP s vnitřním `.isdoc`. Poznáme ho podle
+     * přípony `.isdocx` (content je ZIP magic, ale `.isdocx` NEchceme rozbalovat
+     * generickým unzip()em — má vlastní strukturu manifest+PDF).
+     */
+    private function isIsdocx(string $name, string $content): bool
+    {
+        return str_ends_with(strtolower($name), '.isdocx')
+            && IsdocxExtractor::isZip($content);
+    }
+
     private function isZip(string $name, string $content): bool
     {
+        // `.isdocx` je sice ZIP, ale má vlastní cestu (isIsdocx) — sem nepatří.
+        if (str_ends_with(strtolower($name), '.isdocx')) return false;
         if (str_ends_with(strtolower($name), '.zip')) return true;
         // Magic bytes — PK\x03\x04 nebo PK\x05\x06 (empty zip).
         // PDF má sice taky neuzipped magic, ale začíná `%PDF-`, takže nedojde
@@ -604,6 +660,9 @@ final class InvoiceImportService
             }
             // Skip složky a non-XML/ISDOC
             if (str_ends_with($name, '/')) continue;
+            // ISDOCX manifest (pokud balíček přišel pojmenovaný jako .zip) není faktura
+            // — přeskočíme, ať neparsujeme manifest jako ISDOC a netvoříme failed řádek.
+            if (strtolower(basename($name)) === 'manifest.xml') continue;
             $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
             if (!in_array($ext, ['xml', 'isdoc'], true)) continue;
 

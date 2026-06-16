@@ -1,8 +1,49 @@
 import { api } from './client'
 
-export type InvoiceType = 'invoice' | 'proforma' | 'credit_note' | 'cancellation'
+export type InvoiceType = 'invoice' | 'proforma' | 'credit_note' | 'cancellation' | 'tax_document'
 export type InvoiceStatus = 'draft' | 'issued' | 'sent' | 'reminded' | 'paid' | 'cancelled'
 export type ApprovalStatus = 'none' | 'requested' | 'approved' | 'rejected'
+/** Odvozený platební stav (#89) — počítá se z paid_total vs. amount_to_pay; null pro draft/cancelled. */
+export type PaymentStatus = 'unpaid' | 'partially_paid' | 'paid' | 'overpaid'
+
+/** Evidovaná platba faktury (#89). */
+export interface InvoicePayment {
+  id: number
+  invoice_id: number
+  paid_on: string
+  amount: number
+  currency: string
+  variable_symbol: string | null
+  bank_reference: string | null
+  note: string | null
+  source: 'manual' | 'mark_paid' | 'bank' | 'legacy'
+  bank_transaction_id: number | null
+  bank_statement_id?: number | null
+  bank_counterparty_name?: string | null
+  tax_document_invoice_id: number | null
+  tax_document_varsymbol?: string | null
+  tax_document_status?: InvoiceStatus | null
+  created_at: string
+}
+
+export interface InvoicePaymentsResponse {
+  payments: InvoicePayment[]
+  paid_total: number
+  amount_to_pay: number
+  remaining: number
+  payment_status: PaymentStatus | null
+}
+
+/** Nespárovaná zálohová faktura (proforma) nabídnutá k propojení s daňovým dokladem. */
+export interface AdvanceCandidate {
+  id: number
+  varsymbol: string | null
+  invoice_type: InvoiceType
+  status: InvoiceStatus
+  issue_date: string | null
+  total_with_vat: number
+  currency: string
+}
 
 export interface InvoiceItem {
   id?: number
@@ -58,6 +99,11 @@ export interface Invoice {
   currency_id: number
   currency: string
   reverse_charge: boolean
+  /** Ceny položek zadané včetně DPH (brutto) — DPH se počítá shora koeficientem. */
+  prices_include_vat: boolean
+  /** Doklad není základem daně z příjmů (§4 osvobození / přefakturace) → vyloučen z DPFO/DPPO i SP/ZP. DPH/KH/tržby nedotčeny. */
+  income_tax_exempt: boolean
+  income_tax_exempt_reason: string | null
   language: 'cs' | 'en'
   note_above_items: string | null
   note_below_items: string | null
@@ -68,11 +114,19 @@ export interface Invoice {
   // u dokladu s parent_invoice_id → rodič (proforma / původní faktura).
   final_invoice?: { id: number; varsymbol: string | null; status: InvoiceStatus } | null
   parent_invoice?: { id: number; varsymbol: string | null; status: InvoiceStatus; invoice_type: InvoiceType } | null
+  // U daňového dokladu bez vazby: existují u odběratele nespárované zálohy k propojení?
+  has_advance_candidates?: boolean
+  // U nepropojené proformy: existují u odběratele nepropojené daňové doklady k propojení?
+  has_final_candidates?: boolean
   recurring_template_id: number | null
   advance_paid_amount: number
   discount_percent: number
   payment_method: PaymentMethod
+  auto_send_reminders: boolean
   amount_to_pay: number
+  /** Suma evidovaných plateb (#89); zbývá k úhradě = amount_to_pay - paid_total. */
+  paid_total: number
+  payment_status?: PaymentStatus | null
   total_without_vat: number
   total_vat: number
   total_with_vat: number
@@ -96,6 +150,8 @@ export interface Invoice {
   pdf_path: string | null
   created_at: string
   updated_at: string
+  /** Výsledek děkovného e-mailu (issue #57) — vrací mark-paid, jen když se odesílalo. */
+  payment_thanks?: { status: 'sent' | 'skipped' | 'failed'; reason?: string; recipients?: string[] } | null
   client_company_name?: string
   client_main_email?: string
   client_ic?: string | null
@@ -167,6 +223,8 @@ export interface InvoiceListItem {
   total_with_vat: number
   advance_paid_amount: number
   amount_to_pay: number
+  paid_total?: number
+  payment_status?: PaymentStatus | null
   status: InvoiceStatus
   payment_method: PaymentMethod
   sent_at: string | null
@@ -189,6 +247,10 @@ export interface MonthGroup {
     without_vat: number
     vat: number
     with_vat: number
+    /** Predikce — součet konceptů (draft) vystavených faktur/dobropisů v měsíci. */
+    draft_without_vat: number
+    draft_vat: number
+    draft_with_vat: number
   }>
   invoices: InvoiceListItem[]
 }
@@ -202,12 +264,16 @@ export interface InvoicePayload {
   due_date?: string
   currency_id?: number
   reverse_charge?: boolean
+  prices_include_vat?: boolean
+  income_tax_exempt?: boolean
+  income_tax_exempt_reason?: string | null
   language?: 'cs' | 'en'
   note_above_items?: string | null
   note_below_items?: string | null
   advance_paid_amount?: number
   discount_percent?: number
   payment_method?: PaymentMethod
+  auto_send_reminders?: boolean
   exchange_rate?: number | null
   // Volitelný ruční override čísla faktury (varsymbol). Prázdný řetězec / null =
   // generuje se automaticky při issue dle supplier templatu (Settings → Číslování faktur)
@@ -310,10 +376,41 @@ export const invoicesApi = {
 
   // Akce nad fakturou
   issue:    (id: number) => api.post<Invoice>(`/invoices/${id}/issue`).then(r => r.data),
-  markPaid: (id: number, paidAt?: string) =>
-    api.post<Invoice>(`/invoices/${id}/mark-paid`, { paid_at: paidAt || new Date().toISOString().slice(0, 10) }).then(r => r.data),
+  markPaid: (id: number, paidAt?: string, opts?: { sendThanks?: boolean; thanksTrigger?: 'manual' | 'bulk' }) =>
+    api.post<Invoice>(`/invoices/${id}/mark-paid`, {
+      paid_at: paidAt || new Date().toISOString().slice(0, 10),
+      ...(opts?.sendThanks ? { send_payment_thanks: true, thanks_trigger: opts.thanksTrigger || 'manual' } : {}),
+    }).then(r => r.data),
   unmarkPaid: (id: number) =>
     api.post<Invoice>(`/invoices/${id}/unmark-paid`, {}).then(r => r.data),
+  // Evidence plateb / částečné úhrady (#89)
+  listPayments: (id: number) =>
+    api.get<InvoicePaymentsResponse>(`/invoices/${id}/payments`).then(r => r.data),
+  createPayment: (id: number, payload: {
+    amount: number
+    paid_on?: string
+    variable_symbol?: string | null
+    bank_reference?: string | null
+    note?: string | null
+    send_payment_thanks?: boolean
+  }) =>
+    api.post<{
+      invoice: Invoice
+      payments: InvoicePayment[]
+      payment: InvoicePayment
+      became_paid: boolean
+      remaining: number
+      payment_thanks?: { status: 'sent' | 'skipped' | 'failed'; reason?: string } | null
+    }>(`/invoices/${id}/payments`, payload).then(r => r.data),
+  deletePayment: (id: number, paymentId: number) =>
+    api.delete<{ invoice: Invoice; payments: InvoicePayment[]; became_unpaid: boolean; remaining: number }>(
+      `/invoices/${id}/payments/${paymentId}`,
+    ).then(r => r.data),
+  // Daňový doklad k přijaté platbě (DUZP = datum platby) — DRAFT, idempotentní
+  createPaymentTaxDocument: (id: number, paymentId: number) =>
+    api.post<{ tax_document_id: number; payments: InvoicePayment[] }>(
+      `/invoices/${id}/payments/${paymentId}/tax-document`,
+    ).then(r => r.data),
   cancel: (id: number, mode: 'internal' | 'credit_note', reason: string = '') =>
     api.post<{ cancellation_id?: number; credit_note_id?: number; edit_url?: string; invoice?: Invoice }>(
       `/invoices/${id}/cancel`,
@@ -324,6 +421,16 @@ export const invoicesApi = {
       `/invoices/${proformaId}/issue-final`,
       opts || {},
     ).then(r => r.data),
+  // Zpětné propojení daňového dokladu se zálohovou fakturou (proforma)
+  advanceCandidates: (id: number) =>
+    api.get<{ candidates: AdvanceCandidate[] }>(`/invoices/${id}/advance-candidates`).then(r => r.data.candidates),
+  // Opačný směr — z detailu zálohy nabídni nepropojené daňové doklady téhož odběratele
+  finalCandidates: (id: number) =>
+    api.get<{ candidates: AdvanceCandidate[] }>(`/invoices/${id}/final-candidates`).then(r => r.data.candidates),
+  linkAdvance: (id: number, advanceId: number) =>
+    api.post<Invoice>(`/invoices/${id}/link-advance`, { advance_id: advanceId }).then(r => r.data),
+  unlinkAdvance: (id: number) =>
+    api.delete<Invoice>(`/invoices/${id}/link-advance`).then(r => r.data),
   clone: (id: number, opts?: { increment_month_in_descriptions?: boolean; issue_date?: string }) =>
     api.post<{ draft_id: number }>(`/invoices/${id}/clone`, opts || {}).then(r => r.data),
   bulkReissue: (invoiceIds: number[], opts?: { increment_month_in_descriptions?: boolean; issue_date?: string }) =>
@@ -369,6 +476,16 @@ export const invoicesApi = {
       `/invoices/${id}/send`,
       payload || {},
     ).then(r => r.data),
+
+  /** Vyřešení příjemci dle kontaktů klienta / e-mailů zakázky (#86) — pro prefill modalu s provenancí. */
+  recipients: (id: number, type: 'documents' | 'reminders' | 'approvals' = 'documents') =>
+    api.get<{
+      type: string
+      to: string[]
+      cc: string[]
+      bcc: string[]
+      resolved: Array<{ email: string; recipient: 'to' | 'cc' | 'bcc'; source: 'contact' | 'project' | 'main_email'; usage: string | null; label: string | null }>
+    }>(`/invoices/${id}/recipients`, { params: { type } }).then(r => r.data),
 
   sendReminder: (id: number) =>
     api.post<{ invoice: Invoice; sent_to: string[]; days_overdue: number; sent_at: string }>(

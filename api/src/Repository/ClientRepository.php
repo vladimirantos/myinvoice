@@ -14,7 +14,7 @@ final class ClientRepository
     public function find(int $id): ?array
     {
         $stmt = $this->db->pdo()->prepare(
-            'SELECT c.*, co.iso2 AS country_iso2,
+            'SELECT c.*, co.iso2 AS country_iso2, co.is_eu AS country_is_eu,
                     cur.code AS currency_default
                FROM clients c
                JOIN countries co ON co.id = c.country_id
@@ -141,12 +141,13 @@ final class ClientRepository
         // Page — LIMIT/OFFSET přes bindValue(PARAM_INT) pro defense-in-depth proti SQLi
         $offset = max(0, ($page - 1) * $perPage);
         // Cache `client_revenue_cache` — primární řádek vybíráme přes c.currency_default_id
-        $sql = "SELECT c.id, c.supplier_id, c.company_name, c.ic, c.dic, c.main_email, c.language,
+        $sql = "SELECT c.id, c.supplier_id, c.company_name, c.ic, c.dic, c.tax_number, c.main_email, c.language,
                        c.currency_default_id, cur.code AS currency_default,
-                       c.reverse_charge, c.is_customer, c.is_vendor,
+                       c.reverse_charge, c.is_vat_payer, c.is_customer, c.is_vendor, c.is_fuel_station,
+                       c.auto_send_reminders,
                        c.payment_due_default, c.payment_due_unit, c.hourly_rate,
                        c.default_expense_category_id, c.default_revenue_category_id,
-                       c.archived_at, co.iso2 AS country_iso2,
+                       c.archived_at, co.iso2 AS country_iso2, co.is_eu AS country_is_eu,
                        (SELECT COUNT(*) FROM projects p WHERE p.client_id = c.id AND p.status = 'active' AND p.archived_at IS NULL) AS active_projects_count,
                        COALESCE(crc.revenue, 0) AS revenue,
                        crc.last_invoice_date,
@@ -235,13 +236,13 @@ final class ClientRepository
         $defaultRevenueCategoryId = $this->resolveRevenueCategoryId($data, $supplierId);
 
         $sql = 'INSERT INTO clients
-            (supplier_id, company_name, first_name, last_name, ic, dic, street, city, zip, country_id,
-             main_email, phone, language, currency_default_id, reverse_charge,
-             is_customer, is_vendor,
+            (supplier_id, company_name, first_name, last_name, ic, dic, tax_number, street, city, zip, country_id,
+             main_email, phone, language, currency_default_id, reverse_charge, is_vat_payer,
+             is_customer, is_vendor, is_fuel_station,
              auto_send_reminders, payment_due_default, payment_due_unit, hourly_rate, note,
              default_expense_category_id, default_revenue_category_id,
              invoice_number_format, proforma_number_format, credit_note_number_format, invoice_number_period)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         $stmt = $this->db->pdo()->prepare($sql);
         $stmt->execute([
             $supplierId,
@@ -250,6 +251,9 @@ final class ClientRepository
             $this->nullable($data, 'last_name'),
             $this->nullable($data, 'ic'),
             $this->nullable($data, 'dic'),
+            // Národní daňové číslo (#120) — SK DIČ / DE Steuernummer / PL NIP / HU Adószám;
+            // `dic` u takových klientů nese VAT ID s prefixem (u SK = IČ DPH).
+            $this->nullable($data, 'tax_number'),
             (string) $data['street'],
             (string) $data['city'],
             (string) $data['zip'],
@@ -259,8 +263,12 @@ final class ClientRepository
             (string) ($data['language'] ?? 'cs'),
             $currencyId,
             !empty($data['reverse_charge']) ? 1 : 0,
+            // Plátcovství DPH — default 1 (BC); import doplní z ARES/VIES (neplátce = 0).
+            // isset() → null (nezjištěno) spadne na default 1; VendorVatPayerResolver opraví.
+            isset($data['is_vat_payer']) ? ((int) (bool) $data['is_vat_payer']) : 1,
             $isCustomer,
             $isVendor,
+            array_key_exists('is_fuel_station', $data) ? ((int) (bool) $data['is_fuel_station']) : 0,
             array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1,
             isset($data['payment_due_default']) ? (int) $data['payment_due_default'] : null,
             $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
@@ -286,6 +294,17 @@ final class ClientRepository
         $this->db->pdo()
             ->prepare('UPDATE clients SET is_vendor = 1 WHERE id = ? AND is_vendor = 0')
             ->execute([$id]);
+    }
+
+    /**
+     * Nastaví plátcovství DPH klienta (z ARES dle IČO / VIES dle DIČ). Volá se z importu,
+     * online refresh endpointu i backfill skriptu. Idempotentní.
+     */
+    public function setVatPayer(int $id, bool $isVatPayer): void
+    {
+        $this->db->pdo()
+            ->prepare('UPDATE clients SET is_vat_payer = ? WHERE id = ?')
+            ->execute([$isVatPayer ? 1 : 0, $id]);
     }
 
     /**
@@ -371,10 +390,11 @@ final class ClientRepository
             : $oldDefaultRevenueCategory;
 
         $sql = 'UPDATE clients SET
-                company_name = ?, first_name = ?, last_name = ?, ic = ?, dic = ?,
+                company_name = ?, first_name = ?, last_name = ?, ic = ?, dic = ?, tax_number = ?,
                 street = ?, city = ?, zip = ?, country_id = ?,
                 main_email = ?, phone = ?, language = ?, currency_default_id = ?,
-                reverse_charge = ?, is_customer = ?, is_vendor = ?,
+                reverse_charge = ?, is_vat_payer = COALESCE(?, is_vat_payer), is_customer = ?, is_vendor = ?,
+                is_fuel_station = COALESCE(?, is_fuel_station),
                 auto_send_reminders = ?, payment_due_default = ?, payment_due_unit = ?,
                 hourly_rate = ?, note = ?, default_expense_category_id = ?, default_revenue_category_id = ?,
                 invoice_number_format = ?, proforma_number_format = ?,
@@ -387,6 +407,7 @@ final class ClientRepository
             $this->nullable($data, 'last_name'),
             $this->nullable($data, 'ic'),
             $this->nullable($data, 'dic'),
+            $this->nullable($data, 'tax_number'),
             (string) $data['street'],
             (string) $data['city'],
             (string) $data['zip'],
@@ -396,8 +417,11 @@ final class ClientRepository
             (string) ($data['language'] ?? 'cs'),
             $currencyId,
             !empty($data['reverse_charge']) ? 1 : 0,
+            // COALESCE: null (klíč chybí) → zachová stávající is_vat_payer; jinak nastav.
+            array_key_exists('is_vat_payer', $data) ? ((int) (bool) $data['is_vat_payer']) : null,
             $newIsCustomer,
             $newIsVendor,
+            array_key_exists('is_fuel_station', $data) ? ((int) (bool) $data['is_fuel_station']) : null,
             array_key_exists('auto_send_reminders', $data) ? ((int) (bool) $data['auto_send_reminders']) : 1,
             isset($data['payment_due_default']) ? (int) $data['payment_due_default'] : null,
             $this->nullablePaymentDueUnit($data, 'payment_due_unit'),
@@ -572,8 +596,13 @@ final class ClientRepository
                 : null;
         }
         $row['reverse_charge']        = (bool) ($row['reverse_charge'] ?? 0);
+        // EU členství země klienta — editor podle něj u identifikované osoby (#94)
+        // auto-zapíná RC jen pro EU klienty (3. země = mimo předmět DPH, bez klauzule).
+        if (array_key_exists('country_is_eu', $row)) $row['country_is_eu'] = (bool) $row['country_is_eu'];
+        if (array_key_exists('is_vat_payer', $row)) $row['is_vat_payer'] = (bool) $row['is_vat_payer'];
         if (array_key_exists('is_customer', $row)) $row['is_customer'] = (bool) $row['is_customer'];
         if (array_key_exists('is_vendor', $row))   $row['is_vendor']   = (bool) $row['is_vendor'];
+        if (array_key_exists('is_fuel_station', $row)) $row['is_fuel_station'] = (bool) $row['is_fuel_station'];
         if (array_key_exists('auto_send_reminders', $row)) {
             $row['auto_send_reminders'] = (bool) $row['auto_send_reminders'];
         }
