@@ -67,9 +67,11 @@ final class InvoicePdfRenderer
         );
 
         // Cache je validní jen když je novější než šablona, CSS a kód renderu
+        // (dle zvolené varianty — viz resolvedTemplate()).
+        $tpl = $this->resolvedTemplate();
         $tplMtime = max(
-            @filemtime(Bootstrap::rootDir() . '/styles/invoice.css') ?: 0,
-            @filemtime(Bootstrap::rootDir() . '/api/templates/invoice/invoice.twig') ?: 0,
+            @filemtime($tpl['cssPath']) ?: 0,
+            @filemtime($tpl['twigPath']) ?: 0,
             @filemtime(__FILE__) ?: 0,
         );
         $isFresh = static fn (string $p): bool =>
@@ -204,7 +206,7 @@ final class InvoicePdfRenderer
      */
     public function renderHtmlAndCss(array $invoice, bool $hasIsdocAttachment = false): array
     {
-        $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
+        $cssPath = $this->resolvedTemplate()['cssPath'];
         $css = is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
         // Per-supplier branding barva — přebarví fialové akcenty na zvolený odstín.
         $css .= $this->brandAccentCss($this->resolveSupplier($invoice));
@@ -247,7 +249,7 @@ final class InvoicePdfRenderer
         }
 
         $locale = $invoice['language'] ?? 'cs';
-        $cssPath = Bootstrap::rootDir() . '/styles/invoice.css';
+        $cssPath = $this->resolvedTemplate()['cssPath'];
         $css = $includeCss && is_file($cssPath) ? (string) file_get_contents($cssPath) : '';
         if ($includeCss && $css !== '') {
             $css .= $this->brandAccentCss($supplierData);
@@ -263,7 +265,7 @@ final class InvoicePdfRenderer
         $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
         $signaturePath = $this->resolveSignaturePath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
-        return $twig->render('invoice.twig', [
+        return $twig->render($this->resolvedTemplate()['twigName'], [
             'invoice'           => $invoice,
             'supplier'          => $supplierData,
             'client'            => $clientData,
@@ -315,7 +317,18 @@ final class InvoicePdfRenderer
     private function brandAccentCss(array $supplier): string
     {
         // Sdíleno s výkazem víceprací — viz PdfBranding::accentCss.
-        return PdfBranding::accentCss($supplier);
+        return PdfBranding::accentCss($supplier, $this->resolvedTemplate()['variant']);
+    }
+
+    /**
+     * Vybraná varianta PDF šablony faktury (ENV MYINVOICE_INVOICE_TEMPLATE, default 'invoice').
+     *
+     * @return array{variant:string, twigName:string, twigPath:string, cssPath:string}
+     */
+    private function resolvedTemplate(): array
+    {
+        return (new InvoiceTemplateResolver(Bootstrap::rootDir()))
+            ->resolve((string) $this->config->get('pdf.invoice_template', 'invoice'));
     }
 
     /**
