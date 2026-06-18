@@ -6,6 +6,7 @@ namespace MyInvoice\Action\Settings;
 
 use MyInvoice\Bootstrap;
 use MyInvoice\Http\Json;
+use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
@@ -36,6 +37,7 @@ final class EmailBrandingAction
         private readonly SupplierLogoConverter $converter,
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
+        private readonly Config $config,
     ) {}
 
     /** POST /api/settings/email-branding/logo */
@@ -305,9 +307,10 @@ final class EmailBrandingAction
 
         // Sample obsah
         $vars = [
-            'locale'   => $locale,
-            'subject'  => $locale === 'en' ? 'Invoice 2026005 — sample preview' : 'Faktura 2026005 — ukázka náhledu',
-            'supplier' => $supplier,
+            'locale'        => $locale,
+            'brand_variant' => (string) $this->config->get('brand.variant', ''),
+            'subject'       => $locale === 'en' ? 'Invoice 2026005 — sample preview' : 'Faktura 2026005 — ukázka náhledu',
+            'supplier'      => $supplier,
         ];
         // Inline sample obsah dědící z _layout. Obsahuje částku + tlačítko obarvené
         // přes {{ accent }}, aby náhled reprezentativně ukázal branding barvu i v těle

@@ -70,6 +70,9 @@ final class Mailer
         $twig = $this->twig();
 
         $vars['locale'] = $locale;
+        // Brandová varianta instance (MYINVOICE_BRAND_VARIANT) — _layout.html.twig podle ní
+        // přepne na editorial téma (default '' = výchozí MyInvoice vzhled, beze změny).
+        $vars['brand_variant'] = (string) $this->config->get('brand.variant', '');
         if (!isset($vars['supplier'])) {
             $vars['supplier'] = $this->loadSupplierFooter();
         }
