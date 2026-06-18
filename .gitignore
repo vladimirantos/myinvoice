@@ -35,8 +35,12 @@ desktop.ini
 
 # Rosti deploy — obsahuje produkční secrets a stav stacku, NEpatří do gitu
 docker-compose.rosti.yml
+docker-compose.rosti.*.yml
 .rostistate
 /data/
+
+# Brandové assety nové instance + lokální náhledy (mimo git — logo se nahrává v aplikaci)
+/spotted/
 
 # Soukromé naskenované faktury pro jednorázový import — NEpatří do gitu ani image
 /faktury/
