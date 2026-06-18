@@ -70,8 +70,15 @@ final class PdfBranding
      * Selektory pokrývají fakturu i výkaz (přebytečné selektory u výkazu jsou no-op:
      * .head border, .brand-name, .doc-type, .wr-title/.wr-link platí pro oba).
      */
-    public static function accentCss(array $supplier): string
+    public static function accentCss(array $supplier, string $variant = 'invoice'): string
     {
+        // Brandové varianty (spotted) nesou paletu přímo ve své CSS (styles/<variant>.css),
+        // takže je per-supplier akcentem NEpřebarvujeme. Default 'invoice' = dnešní chování
+        // (early-return se pro něj nespustí → výstup je bitově identický).
+        if ($variant !== 'invoice') {
+            return self::variantAccentCss($variant, $supplier);
+        }
+
         if (empty($supplier['email_branding_enabled'])) {
             return '';
         }
@@ -107,5 +114,19 @@ final class PdfBranding
             . ".note.rc-note { border-left-color: #E8A547; }\n"
             . ".proforma-note { border-left-color: {$color}; }\n"
             . ".wr-title, .wr-link { color: {$color}; }\n";
+    }
+
+    /**
+     * Per-variant accent CSS. Brandové varianty mají paletu fixní ve své CSS, takže
+     * zatím nic nepřipojujeme. Seam pro budoucí variant-specific akcentové úpravy.
+     *
+     * @param array<string,mixed> $supplier
+     */
+    private static function variantAccentCss(string $variant, array $supplier): string
+    {
+        return match ($variant) {
+            'spotted' => '', // styles/spotted.css nese fixní paletu #141414 / #D9512C / #F2EEE6
+            default   => '',
+        };
     }
 }

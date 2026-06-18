@@ -244,6 +244,7 @@ final class Config
             'MYINVOICE_SECRET_KEY'  => ['app.secret_encryption_key', 'string'],
             'MYINVOICE_TIMEZONE'    => ['app.timezone', 'string'],
             'MYINVOICE_LOCALE'      => ['app.locale_default', 'string'],
+            'MYINVOICE_INVOICE_TEMPLATE' => ['pdf.invoice_template', 'string'],
 
             // Database (jednotlivé klíče i kompozitní DATABASE_URL)
             'MYINVOICE_DB_HOST'    => ['db.host', 'string'],
