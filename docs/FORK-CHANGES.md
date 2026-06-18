@@ -98,4 +98,23 @@ SK plátce DPH (DIČ vs IČ DPH, #120), národní daňová čísla klienta (SK/D
 Upstream font `jetbrainsmono` jsme do našeho CSS *nepřebírali* (držíme `DejaVu Sans Mono`).
 
 ---
-_Naposledy aktualizováno: 2026-06-16 (merge upstream v4.6.0 → v4.33.0)._
+## G. Multi-instance brandová varianta — KEEP (fork feature, 2026-06-18)
+Dvě instalace z jednoho repa/image, odlišený branding per stack. Branding (logo, barva,
+email accent) je per-instance **data** (DB + `/data` volume); jediný kód je výběr varianty:
+
+| Co | Soubory |
+|---|---|
+| Výběr varianty faktury (ENV `MYINVOICE_INVOICE_TEMPLATE`, default `invoice`) | `InvoiceTemplateResolver` (sanitizace `[a-z0-9-]` + fallback), `InvoicePdfRenderer` (mtime/CSS/render/brandAccentCss dle resolveru), `Config` env-map |
+| `PdfBranding::accentCss($s, $variant)` | default `invoice` beze změny (early-return seam); brandové varianty nesou paletu ve své CSS |
+| Varianta faktury **spotted** | `api/templates/invoice/spotted.twig` + `styles/spotted.css` (černá #141414 / oranžová #D9512C / béžová #F2EEE6, Montserrat + JetBrains Mono) |
+| Brandová varianta e-mailů (ENV `MYINVOICE_BRAND_VARIANT`, default `''`) | `_layout.html.twig` opt-in `spotted` téma (default byte-identický); `brand_variant` injektován v `Mailer` + `EmailBrandingAction` preview; `Config` env-map |
+| CI deploy obou stacků | `release.yml` matrix (`PULL_ENDPOINT` + `PULL_ENDPOINT_SPOTTED`) |
+| Per-stack compose (secrets) | `docker-compose.rosti.*.yml` (gitignored); spotted: `…spotted.yml` s `MYINVOICE_INVOICE_TEMPLATE=spotted`, `MYINVOICE_BRAND_VARIANT=spotted`, vlastní DB/SMTP/PEPPER/SECRET_KEY |
+
+**Tvrdý invariant:** stávající instance (`invoice.vladimirantos.cz`) tyto ENV nenastavuje →
+default chování beze změny (ověřeno: resolver vrací dnešní cesty, `accentCss` default i
+`_layout` default jsou byte-identické). Upstream tyhle soubory nemá → bez merge konfliktů.
+Spec/plán: `docs/superpowers/{specs,plans}/2026-06-18-multi-instance-invoice-branding*`.
+
+---
+_Naposledy aktualizováno: 2026-06-18 (multi-instance brandová varianta — spotted)._
