@@ -26,8 +26,11 @@ jobs:
       IMAGE: ghcr.io/vladimirantos/myinvoice
       # Endpoint to notify Rosti to pull and restart after a push (stack 1 — vladimirantos)
       PULL_ENDPOINT: ${{ secrets.PULL_ENDPOINT }}
-      # Druhý stack (spotted) — volitelný. Prázdný secret = krok ho přeskočí.
-      PULL_ENDPOINT_SPOTTED: ${{ secrets.PULL_ENDPOINT_SPOTTED }}
+      # Stack 2 (spotted, id 542) — deploy přes SSH (rosticli/webhook tam nedosáhne).
+      # Privátní deploy klíč; prázdný secret = spotted deploy se přeskočí.
+      SPOTTED_SSH_KEY: ${{ secrets.SPOTTED_SSH_KEY }}
+      SPOTTED_SSH_HOST: ssh.rosti.cz
+      SPOTTED_SSH_PORT: "29019"
     steps:
       - uses: actions/checkout@v4
 
@@ -85,42 +88,41 @@ jobs:
       #   - retry s prodlevou → 1. call stáhne image na Rosti (doběhne i po HTTP
       #     timeoutu), další call už ho má v cache → rychlý → vrátí {status:0}
       #   - selžeme až po vyčerpání pokusů, s ručním fallbackem
-      - name: Call pull+up endpoint (oba stacky)
+      # Stack 1 (vladimirantos, 508) — pull+up přes Rosti webhook (rosticli setup-cicd).
+      # Robustní: set +e + jq 2>/dev/null (ne-JSON neshazuje), retry s prodlevou.
+      - name: Deploy stack 1 (vladimirantos) — pull endpoint
         shell: bash
         run: |
           set +e
-          # Robustní notifikace jednoho stacku: retry + tolerance ne-JSON (proxy timeout).
-          notify() {
-            local name="$1" ep="$2"
-            local attempts=5 delay=75 ok=0
-            for i in $(seq 1 $attempts); do
-              echo "[$name] Deploy trigger — pokus $i/$attempts…"
-              RESPONSE=$(curl -sS --connect-timeout 15 --max-time 300 "$ep")
-              CURL_RC=$?
-              STATUS=$(printf '%s' "$RESPONSE" | jq -r '.status' 2>/dev/null)
-              if [ "$CURL_RC" = "0" ] && [ "$STATUS" = "0" ]; then
-                echo "[$name] ✓ Pull endpoint OK (pokus $i)"
-                printf '%s' "$RESPONSE" | jq -r '.stdout // empty' 2>/dev/null
-                ok=1; break
-              fi
-              echo "::warning::[$name] pokus $i neúspěšný (curl_rc=$CURL_RC, status='${STATUS:-<ne-JSON>}'). Odpověď (zkráceno):"
-              printf '%s' "$RESPONSE" | head -c 800; echo
-              [ "$i" -lt "$attempts" ] && { echo "[$name] Čekám ${delay}s a zkusím znovu…"; sleep "$delay"; }
-            done
-            return $([ "$ok" = "1" ] && echo 0 || echo 1)
-          }
+          attempts=5; delay=75; ok=0
+          for i in $(seq 1 $attempts); do
+            echo "Deploy trigger — pokus $i/$attempts…"
+            RESPONSE=$(curl -sS --connect-timeout 15 --max-time 300 "$PULL_ENDPOINT")
+            CURL_RC=$?
+            STATUS=$(printf '%s' "$RESPONSE" | jq -r '.status' 2>/dev/null)
+            if [ "$CURL_RC" = "0" ] && [ "$STATUS" = "0" ]; then
+              echo "✓ Pull endpoint OK (pokus $i)"; printf '%s' "$RESPONSE" | jq -r '.stdout // empty' 2>/dev/null; ok=1; break
+            fi
+            echo "::warning::pokus $i neúspěšný (curl_rc=$CURL_RC, status='${STATUS:-<ne-JSON>}')."
+            printf '%s' "$RESPONSE" | head -c 800; echo
+            [ "$i" -lt "$attempts" ] && { echo "Čekám ${delay}s…"; sleep "$delay"; }
+          done
+          [ "$ok" = "1" ] || { echo "::error::Stack vladimirantos nedoběhl. Image je na ghcr."; exit 1; }
 
-          overall=0
-          # Stack 1 (vladimirantos) — povinný.
-          notify "vladimirantos" "$PULL_ENDPOINT" || { echo "::error::Stack vladimirantos nedoběhl."; overall=1; }
-          # Stack 2 (spotted) — volitelný: bez secretu se přeskočí.
-          if [ -n "$PULL_ENDPOINT_SPOTTED" ]; then
-            notify "spotted" "$PULL_ENDPOINT_SPOTTED" || { echo "::error::Stack spotted nedoběhl."; overall=1; }
-          else
-            echo "PULL_ENDPOINT_SPOTTED není nastaven → spotted stack přeskočen."
-          fi
-
-          if [ "$overall" != "0" ]; then
-            echo "::error::Aspoň jeden stack nepotvrdil úspěch. Image je na ghcr — nasaď ručně: rosticli stacks ssh docker compose up -d app"
-            exit 1
-          fi
+      # Stack 2 (spotted, 542) — deploy přes SSH (panel-managed stack, bez webhooku).
+      # SSH na VM, `docker compose pull && up` v /srv/stack (image je veřejný na ghcr,
+      # migrace běží přes docker-entrypoint.sh při startu kontejneru). Bez secretu se přeskočí.
+      - name: Deploy stack 2 (spotted) — SSH
+        if: ${{ env.SPOTTED_SSH_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SPOTTED_SSH_KEY" > ~/.ssh/spotted_deploy
+          chmod 600 ~/.ssh/spotted_deploy
+          ssh-keyscan -p "$SPOTTED_SSH_PORT" "$SPOTTED_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/spotted_deploy -p "$SPOTTED_SSH_PORT" \
+            -o IdentitiesOnly=yes -o ConnectTimeout=20 \
+            "root@$SPOTTED_SSH_HOST" \
+            "bash -c 'cd /srv/stack && docker compose pull && docker compose up -d'"
+          echo "✓ Spotted deploy přes SSH OK"

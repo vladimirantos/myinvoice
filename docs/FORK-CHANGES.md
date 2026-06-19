@@ -108,8 +108,8 @@ email accent) je per-instance **data** (DB + `/data` volume); jediný kód je v�
 | `PdfBranding::accentCss($s, $variant)` | default `invoice` beze změny (early-return seam); brandové varianty nesou paletu ve své CSS |
 | Varianta faktury **spotted** | `api/templates/invoice/spotted.twig` + `styles/spotted.css` (černá #141414 / oranžová #D9512C / béžová #F2EEE6, Montserrat + JetBrains Mono) |
 | Brandová varianta e-mailů (ENV `MYINVOICE_BRAND_VARIANT`, default `''`) | `_layout.html.twig` opt-in `spotted` téma (default byte-identický); `brand_variant` injektován v `Mailer` + `EmailBrandingAction` preview; `Config` env-map |
-| CI deploy obou stacků | `release.yml` matrix (`PULL_ENDPOINT` + `PULL_ENDPOINT_SPOTTED`) |
-| Per-stack compose (secrets) | `docker-compose.rosti.*.yml` (gitignored); spotted: `…spotted.yml` s `MYINVOICE_INVOICE_TEMPLATE=spotted`, `MYINVOICE_BRAND_VARIANT=spotted`, vlastní DB/SMTP/PEPPER/SECRET_KEY |
+| CI deploy obou stacků | `release.yml`: stack 1 (vladimirantos, 508) přes Rosti webhook `PULL_ENDPOINT`; stack 2 (spotted, 542) přes **SSH** (`SPOTTED_SSH_KEY` secret → `ssh root@ssh.rosti.cz:29019` → `docker compose pull && up`). Spotted je panel-managed stack pod company Spotted s.r.o. (7570), který rosticli/webhook nedosáhne. GHCR image je **veřejný** → bez registry creds. |
+| Per-stack compose (secrets) | `docker-compose.rosti.*.yml` (gitignored); spotted: `…spotted.yml` s `MYINVOICE_INVOICE_TEMPLATE=spotted`, `MYINVOICE_BRAND_VARIANT=spotted`, vlastní DB/SMTP/PEPPER/SECRET_KEY. Compose je na 542 **Rosti-managed** (autoritativní je panel editor, `/srv/stack/docker-compose.yml`). |
 
 **Tvrdý invariant:** stávající instance (`invoice.vladimirantos.cz`) tyto ENV nenastavuje →
 default chování beze změny (ověřeno: resolver vrací dnešní cesty, `accentCss` default i
