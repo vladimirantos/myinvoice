@@ -120,9 +120,10 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SPOTTED_SSH_KEY" > ~/.ssh/spotted_deploy
           chmod 600 ~/.ssh/spotted_deploy
-          ssh-keyscan -p "$SPOTTED_SSH_PORT" "$SPOTTED_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # accept-new = host key se přijme při 1. spojení (nezávisí na ssh-keyscan,
+          # který v runneru selhával → host key verification → exit 255).
           ssh -i ~/.ssh/spotted_deploy -p "$SPOTTED_SSH_PORT" \
-            -o IdentitiesOnly=yes -o ConnectTimeout=20 \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
             "root@$SPOTTED_SSH_HOST" \
             "bash -c 'cd /srv/stack && docker compose pull && docker compose up -d'"
           echo "✓ Spotted deploy přes SSH OK"
