@@ -38,7 +38,7 @@ final class FuelScanRepository
     /**
      * Faktury od benzínek pro přehled „Načíst z faktur".
      *
-     * @param array{only_unscanned?:bool, year?:int} $filters
+     * @param array{only_unscanned?:bool, year?:int, scanned_limit?:int} $filters
      * @return list<array<string,mixed>>
      */
     public function listFuelStationInvoices(int $supplierId, array $filters = []): array
@@ -64,7 +64,7 @@ final class FuelScanRepository
         $sql .= ' ORDER BY pi.issue_date DESC, pi.id DESC';
         $stmt = $this->db->pdo()->prepare($sql);
         $stmt->execute($params);
-        return array_map(function (array $r): array {
+        $rows = array_map(function (array $r): array {
             return [
                 'id'                    => (int) $r['id'],
                 'vendor_id'             => (int) $r['vendor_id'],
@@ -80,6 +80,17 @@ final class FuelScanRepository
                 'scanned'               => (int) $r['scanned'] > 0,
             ];
         }, $stmt->fetchAll(PDO::FETCH_ASSOC));
+
+        // Nespárované (nevytěžené) zobraz všechny, spárované jen posledních N (řazení už DESC).
+        $scannedLimit = isset($filters['scanned_limit']) ? max(0, (int) $filters['scanned_limit']) : null;
+        if ($scannedLimit !== null) {
+            $scannedSeen = 0;
+            $rows = array_values(array_filter($rows, static function (array $r) use (&$scannedSeen, $scannedLimit): bool {
+                if (!$r['scanned']) return true;
+                return ++$scannedSeen <= $scannedLimit;
+            }));
+        }
+        return $rows;
     }
 
     /**

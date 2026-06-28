@@ -29,6 +29,14 @@ export interface WrPreviewItem {
   total_amount: number
 }
 
+export interface WrPreviewMaterial {
+  description: string
+  quantity: number
+  unit: string
+  unit_price: number
+  total_amount: number
+}
+
 export interface WrPreviewReport {
   invoice_id: number
   label: string | null
@@ -39,6 +47,25 @@ export interface WrPreviewReport {
   total_hours: number
   total_amount: number
   items: WrPreviewItem[]
+  material_title: string | null
+  material_total: number
+  materials: WrPreviewMaterial[]
+}
+
+export interface WrSupplier {
+  name: string
+  company_name: string
+  tagline: string | null
+  street: string | null
+  city: string | null
+  zip: string | null
+  country: string | null
+  ic: string | null
+  dic: string | null
+  is_vat_payer: boolean
+  email: string | null
+  phone: string | null
+  web: string | null
 }
 
 export interface WrPreview {
@@ -47,6 +74,7 @@ export interface WrPreview {
   project_name: string | null
   language: 'cs' | 'en'
   supplier_name: string
+  supplier?: WrSupplier
   accent_color: string | null
   /** Logo dodavatele jako data: URI (jen při zapnutém brandingu), jinak null → MyInvoice. */
   logo_src: string | null

@@ -384,6 +384,10 @@ table.czk-recap tr.grand td {
     font-size: 8pt;
     color: #A7A0BA;
     margin-top: 0.5mm;
+    font-family: 'montserrat', 'DejaVu Sans', sans-serif;
+    /* Bez letter-spacingu mPDF přebíjí kern pár „Pl" tak, že „l" zmizí
+       (např. „v Plzni" → „v P zni"). Drobné rozpáčení glyfy vrátí a zlepší čitelnost. */
+    letter-spacing: 0.15pt;
 }
 .page-attribution {
     text-align: center;

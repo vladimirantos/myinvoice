@@ -87,6 +87,7 @@ use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\ExportPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\GetPurchaseInvoiceAction;
 use MyInvoice\Action\PurchaseInvoice\PaymentQrAction;
+use MyInvoice\Action\PurchaseInvoice\PaymentOrderAction;
 use MyInvoice\Action\PurchaseInvoice\ListPurchaseInvoicesAction;
 use MyInvoice\Action\PurchaseInvoice\PurchaseInvoiceActivityAction;
 use MyInvoice\Action\PurchaseInvoice\ScanInboxAction;
@@ -117,6 +118,7 @@ use MyInvoice\Action\Invoice\SendTestReminderAction;
 use MyInvoice\Action\Invoice\UpdateInvoiceAction;
 use MyInvoice\Action\WorkReport\GetWorkReportAction;
 use MyInvoice\Action\WorkReport\SaveWorkReportAction;
+use MyInvoice\Action\WorkReport\SaveWorkReportMaterialsAction;
 use MyInvoice\Action\WorkReport\DeleteWorkReportAction;
 use MyInvoice\Action\WorkReport\WorkReportLinkAction;
 use MyInvoice\Action\WorkReport\PublicWorkReportGetAction;
@@ -173,6 +175,10 @@ final class Routes
         $app->post ('/api/admin/update/refresh', [UpdateAction::class, 'refresh']);
         $app->post ('/api/admin/update/trigger', [UpdateAction::class, 'trigger']);
         $app->post ('/api/admin/update/cancel',  [UpdateAction::class, 'cancel']);
+
+        // Admin — správa ukázkových (sample) dat (issue #162); admin-only přes RoleMiddleware
+        $app->get   ('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'status']);
+        $app->delete('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'delete']);
 
         $app->group('/api/auth', function ($g) {
             $g->get ('/setup-status',    SetupStatusAction::class);
@@ -342,6 +348,16 @@ final class Routes
         $app->get    ('/api/purchase-invoices/{id:[0-9]+}/payment-qr',     PaymentQrAction::class);
         $app->post   ('/api/purchase-invoices/{id:[0-9]+}/payment-qr/extract-account', [PaymentQrAction::class, 'extractAccount']);
         $app->put    ('/api/purchase-invoices/{id:[0-9]+}/payment-account', [PaymentQrAction::class, 'updateAccount']);
+        // Platební příkazy (payment orders) — hromadný příkaz k úhradě z nezaplacených
+        // přijatých faktur do CSV/PDF/ABO(KPC). Literální „payment-orders" je nečíselné,
+        // takže nekoliduje s GET /{id:[0-9]+}. POST je write (RoleMiddleware dle metody).
+        $app->get    ('/api/purchase-invoices/payment-orders/candidates',          [PaymentOrderAction::class, 'candidates']);
+        $app->get    ('/api/purchase-invoices/payment-orders/verify-account',       [PaymentOrderAction::class, 'verifyAccount']);
+        $app->get    ('/api/purchase-invoices/payment-orders',                      [PaymentOrderAction::class, 'history']);
+        $app->post   ('/api/purchase-invoices/payment-orders',                      [PaymentOrderAction::class, 'create']);
+        $app->post   ('/api/purchase-invoices/payment-orders/mark',                 [PaymentOrderAction::class, 'markOrdered']);
+        $app->get    ('/api/purchase-invoices/payment-orders/{id:[0-9]+}/download', [PaymentOrderAction::class, 'download']);
+        $app->get    ('/api/purchase-invoices/payment-orders/{id:[0-9]+}',          [PaymentOrderAction::class, 'show']);
 
         // Pravidelné fakturace (recurring templates)
         $app->get    ('/api/recurring',                       [RecurringTemplateAction::class, 'list']);
@@ -357,6 +373,7 @@ final class Routes
         // Work reports — výkaz víceprací (M5)
         $app->get    ('/api/invoices/{id:[0-9]+}/work-report', GetWorkReportAction::class);
         $app->put    ('/api/invoices/{id:[0-9]+}/work-report', SaveWorkReportAction::class);
+        $app->put    ('/api/invoices/{id:[0-9]+}/work-report/materials', SaveWorkReportMaterialsAction::class);
         $app->delete ('/api/invoices/{id:[0-9]+}/work-report', DeleteWorkReportAction::class);
 
         // Schvalování výkazu zákazníkem (M8)
@@ -570,6 +587,7 @@ final class Routes
         $app->delete('/api/bank-statements/{id:[0-9]+}',     [BankStatementAction::class, 'delete']);
         $app->post ('/api/bank-statements/{id:[0-9]+}/rematch', [BankStatementAction::class, 'rematch']);
         $app->get  ('/api/bank-transactions/{id:[0-9]+}/match-candidates', [BankStatementAction::class, 'matchCandidates']);
+        $app->get  ('/api/bank-transactions/{id:[0-9]+}/split-suggestions', [BankStatementAction::class, 'splitSuggestions']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/match',   [BankStatementAction::class, 'manualMatch']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/unmatch', [BankStatementAction::class, 'unmatch']);
         $app->post ('/api/bank-transactions/{id:[0-9]+}/ignore',  [BankStatementAction::class, 'ignore']);

@@ -15,6 +15,7 @@ import { useYearOptions } from '@/composables/useYearOptions'
 import TableSkeleton from '@/components/ui/TableSkeleton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import SearchableSelect from '@/components/ui/SearchableSelect.vue'
+import FilterBar from '@/components/ui/FilterBar.vue'
 import WorkReportModal from '@/components/modals/WorkReportModal.vue'
 
 const { t, tm, rt } = useI18n()
@@ -47,6 +48,20 @@ const unpaidOnly = ref(false)
 const currencyFilter = ref<string>('')
 const clients = ref<Client[]>([])
 const currencies = ref<Currency[]>([])
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry" (rok i hledání se nepočítají — rok má výchozí hodnotu, hledání je vždy vidět)
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (statusFilter.value) n++
+  if (typeFilter.value) n++
+  if (clientFilter.value !== '') n++
+  if (currencyFilter.value) n++
+  if (monthFilter.value !== '') n++
+  if (dateFrom.value || dateTo.value) n++
+  if (overdueOnly.value) n++
+  if (unpaidOnly.value) n++
+  return n
+})
 
 const selectedIds = ref<number[]>([])
 const bulkBusy = ref(false)
@@ -517,14 +532,15 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
     </div>
 
     <!-- Filtry -->
-    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm mb-4 p-3">
-      <div class="flex flex-wrap items-center gap-2">
+    <FilterBar :active-count="activeFilterCount">
+      <template #primary>
         <input
           v-model="search"
           type="search"
           :placeholder="t('invoice.search_placeholder')"
           class="flex-1 min-w-48 h-9 px-3 border border-neutral-300 rounded-md text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
         />
+      </template>
         <select v-model="statusFilter" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('invoice.all_statuses') }}</option>
           <option value="draft">{{ t('status.draft') }}</option>
@@ -582,8 +598,7 @@ const monthOptions = computed(() => (tm('common.months_short') as unknown as str
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 0 1 2-2h11l5 5v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
           {{ t('invoice.csv_export') }}
         </button>
-      </div>
-    </div>
+    </FilterBar>
 
     <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
       <TableSkeleton :rows="8" :cols="7" />

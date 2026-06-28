@@ -47,6 +47,7 @@ final class InvoiceImportService
         private readonly InvoiceCalculator $calculator,
         private readonly IsdocToPurchaseInvoiceMapper $purchaseMapper,
         private readonly VarsymbolGenerator $varsymbol,
+        private readonly PurchaseInvoicePdfArchiver $pdfArchiver,
     ) {}
 
     /**
@@ -81,12 +82,18 @@ final class InvoiceImportService
         foreach ($files as $f) {
             // ISDOCX balíček (ZIP s .isdoc + PDF + manifest) → vytáhni vnitřní .isdoc.
             // Musí předcházet obecnému isZip(): jinak by se rozbalil jako bundle a
-            // manifest.xml / PDF by dělaly šum. PDF z balíčku batch import nearchivuje
-            // (stejně jako u holého .isdoc); pro náhled slouží upload přes AI/dropzone.
+            // manifest.xml / PDF by dělaly šum. Čitelné PDF z balíčku si neseme dál a
+            // u přijaté faktury ho archivujeme (issue #149) — stejně jako AI/dropzone
+            // a inbox scan; vystavená (issued) cesta ho ignoruje.
             if ($this->isIsdocx($f['name'], $f['content'])) {
                 $pkg = (new IsdocxExtractor())->unwrap($f['content']);
                 if ($pkg !== null) {
-                    $flat[] = ['name' => $f['name'] . '/' . $pkg['isdoc_name'], 'content' => $pkg['isdoc']];
+                    $flat[] = [
+                        'name'     => $f['name'] . '/' . $pkg['isdoc_name'],
+                        'content'  => $pkg['isdoc'],
+                        'pdf'      => $pkg['pdf'],
+                        'pdf_name' => $pkg['pdf_name'] ?? preg_replace('/\.isdocx?$/i', '.pdf', basename($f['name'])),
+                    ];
                 } else {
                     // Nepodařilo se rozbalit → necháme na parseRaw čitelnou chybu.
                     $flat[] = $f;
@@ -103,11 +110,24 @@ final class InvoiceImportService
         }
 
         // 2. Parsování všech souborů — žádná supplier_ic validation tady, ta se dělá při dispatch
-        //    (rozdíl mezi issued vs purchase route).
+        //    (rozdíl mezi issued vs purchase route). K položce si přibalíme i čitelné PDF
+        //    (z ISDOCX balíčku, nebo přímo nahrané PDF/A-3 s embedded ISDOC), aby ho
+        //    processPurchase() mohl zaarchivovat k vytvořené přijaté faktuře (issue #149).
         $parsed = [];
         foreach ($flat as $f) {
             $r = $this->parseRaw($f['name'], $f['content']);
-            $parsed[] = ['file' => $f['name']] + $r;
+            $entry = ['file' => $f['name']] + $r;
+            $pdf     = $f['pdf'] ?? null;
+            $pdfName = $f['pdf_name'] ?? null;
+            if ($pdf === null && $this->isPdf($f['name'], $f['content']) && str_starts_with($f['content'], '%PDF')) {
+                $pdf     = $f['content'];
+                $pdfName = basename($f['name']);
+            }
+            if ($pdf !== null) {
+                $entry['pdf']      = $pdf;
+                $entry['pdf_name'] = $pdfName;
+            }
+            $parsed[] = $entry;
         }
 
         // 3. Cross-batch analýza emailů (jen pro issued cesta).
@@ -143,7 +163,7 @@ final class InvoiceImportService
                     if ($route === 'issued') {
                         $r = $this->processOne($inv, $supplierId, $userId, $emailMap);
                     } elseif ($route === 'purchase') {
-                        $r = $this->processPurchase($inv, $supplierId, $userId);
+                        $r = $this->processPurchase($inv, $supplierId, $userId, $entry['pdf'] ?? null, $entry['pdf_name'] ?? null);
                     } else {
                         // 'reject' — ISDOC patří jinému plátci (neshoda IČO s tenantem)
                         $r = ['status' => 'failed', 'reason' => $route];
@@ -232,12 +252,24 @@ final class InvoiceImportService
      * Reuse IsdocToPurchaseInvoiceMapper.
      *
      * @param array<string,mixed> $inv
+     * @param string|null $pdfBytes Čitelné PDF k archivaci (ISDOCX balíček / nahrané PDF/A-3).
      * @return array<string,mixed>
      */
-    private function processPurchase(array $inv, int $supplierId, int $userId): array
+    private function processPurchase(array $inv, int $supplierId, int $userId, ?string $pdfBytes = null, ?string $pdfName = null): array
     {
         try {
             $r = $this->purchaseMapper->map($inv, $supplierId, $userId);
+            // Čitelné PDF (z ISDOCX balíčku nebo nahraného PDF/A-3 s embedded ISDOC)
+            // zaarchivuj k faktuře pro náhled/stažení (issue #149) — stejná archivace
+            // jako AI/dropzone a inbox scan (sdílený PurchaseInvoicePdfArchiver).
+            if ($pdfBytes !== null && $pdfBytes !== '') {
+                $this->pdfArchiver->archiveBytes(
+                    (int) $r['purchase_invoice_id'],
+                    $supplierId,
+                    $pdfBytes,
+                    $pdfName,
+                );
+            }
             return [
                 'status' => 'created',
                 'reason' => $r['vendor_created'] ? 'vytvořen vendor + draft přijaté faktury' : 'draft přijaté faktury (vendor reuse)',

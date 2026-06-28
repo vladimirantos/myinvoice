@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.33.0** (merge 2026-06-16; předtím v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.42.0** (merge 2026-06-28; předtím v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -117,4 +117,38 @@ default chování beze změny (ověřeno: resolver vrací dnešní cesty, `accen
 Spec/plán: `docs/superpowers/{specs,plans}/2026-06-18-multi-instance-invoice-branding*`.
 
 ---
-_Naposledy aktualizováno: 2026-06-18 (multi-instance brandová varianta — spotted)._
+## H. Merge v4.42.0 (2026-06-28) — řešení konfliktů
+
+5 konfliktních souborů (vše v oblasti PDF designu / razítka), vyřešeno:
+
+**KEEP náš design (sekce B):**
+- `invoice.twig`: party-tick accent bar (ne upstream `party-customer` box), naše šířky sloupců
+  (26/10/6/13/9/18/18), paid-badge + qr-box (ne upstream `pay-panel` — platební metoda je u nás
+  už nahoře v `party-kv` „Způsob platby", takže žádná ztráta info), patička v page-footeru
+  (ne upstream inline `div.footer`).
+- `invoice.css`: party-tick, discount-row, czk-recap border. Smazáno osiřelé `.parties td.party-customer`
+  a nepřevzaté `.pay-panel`/`.bank-*`/`.vat` CSS (k neadoptovaným upstream prvkům).
+- `PdfBranding.php`: náš `accentCss` (cílí naše třídy: accent-bar, party-tick, grand border-top).
+
+**ADOPTOVÁNO z upstreamu (nová funkcionalita / fix, přeneseno do našeho layoutu):**
+- **Výkaz materiálu** (migrace `0114_work_report_materials`): celá `{% if _has_material %}` tabulka
+  na 2. stránce + detekce material-položky pro proklik (`_is_mat_item`) + dynamický titulek
+  `_doc_type` („Výkaz prací a materiálu / víceprací / materiálu") — vloženo do našeho `doc-title`
+  s accent-barem. Material tabulka používá `class="items"` → dědí náš design automaticky.
+- `PdfLogoFlattener` (issue #152): splácnutí alfa kanálu PNG loga (auto-merge, vlastní upstream soubor).
+- `SupplierLogoConverter::delete()`: přidána přípona `.pdf.png` do úklidu (drží náš `$subdir` param).
+- `.page-supplier` kerning fix (letter-spacing 0.15pt + montserrat) — sloučeno s naším `margin-top`.
+
+**Marginy:** drženy naše (`margin_bottom 26` + `margin_footer 9`, side 15) kvůli 3řádkové patičce —
+ne upstream 18 / side 12.
+
+**⚠️ Migrace `0113_mark_all_invoices_paid.sql` — VĚDOMĚ NEPŘEČÍSLOVÁNA** (odchylka od pravidla výše).
+Upstream přidal `0113_payment_orders.sql` (kolize čísla), ale migrátor trackuje podle **plného názvu**
+(`migrations.filename` PK), takže dvě `0113_*` koexistují bez problému — naše je už `applied` na obou
+instancích → přeskočí se. Přečíslování na 0123 by migrátor vyhodnotil jako novou migraci a **spustil ji
+znovu → označil by i aktuálně nezaplacené faktury jako paid (poškození dat na živé instanci).** Pravidlo
+„přečísluj nad max" platí jen pro idempotentní migrace; tato není. Necháváme na 0113. (Případný cleanup =
+`git rm` po doběhnutí — záznam v `migrations` na produkci zůstane, fresh DB ji pak přeskočí.)
+
+---
+_Naposledy aktualizováno: 2026-06-28 (merge upstream v4.42.0)._

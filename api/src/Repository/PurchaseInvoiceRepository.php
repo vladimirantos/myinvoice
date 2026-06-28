@@ -255,6 +255,13 @@ final class PurchaseInvoiceRepository
         if (!empty($filters['needs_review'])) {
             $where[] = "pi.extraction_warning IS NOT NULL";
         }
+        // „Předané k úhradě" — odvozená dimenze (příznak payment_ordered_at), NE status.
+        // '1' = předané, '0' = nepředané. Status zůstává received/booked/paid (ortogonální).
+        if (isset($filters['payment_ordered']) && $filters['payment_ordered'] !== null && $filters['payment_ordered'] !== '') {
+            $where[] = ((string) $filters['payment_ordered'] === '1')
+                ? 'pi.payment_ordered_at IS NOT NULL'
+                : 'pi.payment_ordered_at IS NULL';
+        }
         if (!empty($filters['q'])) {
             // Escape % a _ wildcards aby uživatelský input nedělal slow-query / unexpected match
             $q = addcslashes((string) $filters['q'], '%_\\');
@@ -278,6 +285,7 @@ final class PurchaseInvoiceRepository
                        pi.exchange_rate, pi.exchange_rate_date,
                        pi.total_without_vat, pi.total_vat, pi.total_with_vat,
                        pi.advance_paid_amount, pi.amount_to_pay,
+                       pi.payment_ordered_at,
                        pi.status, pi.booked_at, pi.paid_at, pi.cancelled_at,
                        pi.extraction_warning, pi.vat_deduction, pi.vat_deduction_percent, pi.tax_deductible,
                        c.company_name AS vendor_company_name, c.ic AS vendor_ic,
@@ -552,6 +560,69 @@ final class PurchaseInvoiceRepository
     }
 
     /**
+     * Nezaplacené přijaté faktury vhodné do platebního příkazu (status received/booked
+     * a zbývá k úhradě). Vrací platební údaje příjemce + DIČ dodavatele (pro CRPDPH
+     * ověření). Volitelný filtr měny (= měna účtu plátce).
+     *
+     * @return list<array<string,mixed>>
+     */
+    public function listPaymentCandidates(int $supplierId, ?string $currency = null): array
+    {
+        $where = ["pi.supplier_id = ?", "pi.status IN ('received','booked')", "pi.amount_to_pay > 0"];
+        $params = [$supplierId];
+        if ($currency !== null && $currency !== '') {
+            $where[] = 'cur.code = ?';
+            $params[] = strtoupper($currency);
+        }
+        $sql = "SELECT pi.id, pi.vendor_invoice_number, pi.varsymbol, pi.document_kind,
+                       pi.vendor_id, pi.issue_date, pi.due_date,
+                       pi.total_with_vat, pi.amount_to_pay, pi.rounding,
+                       (pi.pdf_path IS NOT NULL AND pi.pdf_path <> '') AS has_pdf,
+                       pi.payment_account_number, pi.payment_bank_code, pi.payment_iban, pi.payment_bic,
+                       pi.payment_variable_symbol, pi.payment_constant_symbol,
+                       pi.payment_account_source, pi.payment_account_checked_at, pi.payment_ordered_at,
+                       cur.code AS currency, cur.symbol AS currency_symbol,
+                       c.company_name AS vendor_company_name, c.dic AS vendor_dic, c.ic AS vendor_ic
+                  FROM purchase_invoices pi
+                  JOIN clients c     ON c.id   = pi.vendor_id
+                  JOIN currencies cur ON cur.id = pi.currency_id
+                 WHERE " . implode(' AND ', $where) . "
+                 ORDER BY pi.due_date ASC, pi.id ASC";
+        $stmt = $this->db->pdo()->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        foreach ($rows as &$r) {
+            $r['id']             = (int) $r['id'];
+            $r['vendor_id']      = (int) $r['vendor_id'];
+            $r['total_with_vat'] = (float) $r['total_with_vat'];
+            $r['amount_to_pay']  = (float) $r['amount_to_pay'];
+            $r['rounding']       = (float) ($r['rounding'] ?? 0);
+            $r['has_pdf']        = (bool) $r['has_pdf'];
+        }
+        return $rows;
+    }
+
+    /**
+     * Označí faktury jako zařazené do (vyexportovaného) platebního příkazu.
+     * Status NEpřeklápí — to je samostatné rozhodnutí (mark_paid přes setStatus).
+     *
+     * @param list<int> $ids
+     */
+    public function markPaymentOrdered(array $ids, int $supplierId): void
+    {
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        if ($ids === []) {
+            return;
+        }
+        $place = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->db->pdo()->prepare(
+            "UPDATE purchase_invoices SET payment_ordered_at = NOW()
+              WHERE supplier_id = ? AND id IN ($place)"
+        );
+        $stmt->execute(array_merge([$supplierId], $ids));
+    }
+
+    /**
      * Update draft přijaté faktury. Volající má ověřit, že je `status='draft'`.
      */
     public function updateDraft(int $id, array $data, int $supplierId): void
@@ -680,8 +751,8 @@ final class PurchaseInvoiceRepository
         // Reverse charge + země dodavatele — určuje klasifikační kód:
         //   CZ vendor → '40'/'41'/'42' (tuzemsko podle sazby)
         //   CZ vendor + RC → '5' (přenesená povinnost)
-        //   EU vendor s 0% → '24' (přijetí služby z EU) — typický pro Anthropic, GitHub apod.
-        //   non-EU vendor s 0% → '25' (dovoz ze 3. země)
+        //   EU vendor s 0% → '24e' (přijetí služby z EU, ř.5) — typický pro Microsoft Ireland apod.
+        //   non-EU vendor s 0% → '24' (přijetí služby ze 3. země, ř.12) — Anthropic, GitHub apod.
         $metaStmt = $pdo->prepare(
             'SELECT pi.reverse_charge, co.iso2,
                     COALESCE(pi.tax_date, pi.issue_date) AS doc_date
@@ -734,14 +805,14 @@ final class PurchaseInvoiceRepository
      *     12% standard  → '41' (přijaté plnění tuzemsko — snížená)
      *     0%            → null (osvobozeno bez nároku — user si vybere)
      *   EU vendor (DE, SK, AT, IE, …):
-     *     0% → '24' (přijetí služby z EU — typický pro Anthropic, GitHub, Microsoft Ireland)
+     *     0% → '24e' (přijetí služby z EU, ř.5 — typický pro Microsoft Ireland)
      *     21%/12% → tuzemsko sazby (vendor v EU vykazuje českou DPH — vzácné)
      *   Non-EU vendor (US, UK, atd.):
-     *     0% → '25' (dovoz ze 3. země)
+     *     0% → '24' (přijetí služby ze 3. země / od neusazené osoby, ř.12 — Anthropic, GitHub)
      *     jinak tuzemsko sazby
      *
-     * Pro pořízení zboží z EU ('23' místo služby '24') si user změní ručně —
-     * default 0%+EU mapujeme na služby, což je častější CZ IT use case.
+     * Pro pořízení zboží z EU ('23') či dovoz zboží ze 3. země ('25') si user
+     * změní ručně — default 0%+zahraničí mapujeme na SLUŽBY, což je častější CZ IT use case.
      * AI import sem u RC dokladů nespadne: nastavuje explicitní kód (23/24/25 dle
      * supply_nature) + tuzemskou sazbu 21 % už v AiPdfExtractoru (issue #116).
      */

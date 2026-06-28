@@ -341,6 +341,33 @@ export const invoicesApi = {
     return api.get<{ data: MonthGroup[]; meta: InvoiceListMeta }>('/invoices', { params }).then(r => r.data)
   },
 
+  /**
+   * Plochý seznam OTEVŘENÝCH (nezaplacených) vystavených faktur a proforem pro picker
+   * (např. kotva sloučené úhrady v bankovním párování). Vrací max `limit` položek
+   * seřazených dle splatnosti. Hledá fulltextem (varsymbol + jméno klienta).
+   */
+  searchOpen: (q: string, limit = 20): Promise<InvoiceListItem[]> =>
+    invoicesApi.listGrouped({
+      q,
+      status: ['issued', 'sent', 'reminded'],
+      type: ['invoice', 'proforma'],
+      unpaid_only: true,
+      per_page: limit,
+    }).then(r => r.data.flatMap(g => g.invoices)),
+
+  /**
+   * Jako searchOpen, ale vč. ZAPLACENÝCH faktur — pro kotvu sloučené úhrady, kde
+   * spárování zaplacené faktury znamená rekonciliaci existující platby (proto musí
+   * jít vybrat i 'paid'). Bez unpaid_only, status zahrnuje 'paid'.
+   */
+  searchMatchable: (q: string, limit = 20): Promise<InvoiceListItem[]> =>
+    invoicesApi.listGrouped({
+      q,
+      status: ['issued', 'sent', 'reminded', 'paid'],
+      type: ['invoice', 'proforma'],
+      per_page: limit,
+    }).then(r => r.data.flatMap(g => g.invoices)),
+
   exportCsv: (filters: ListFilters = {}) => {
     const params = new URLSearchParams()
     if (filters.q) params.set('q', filters.q)
@@ -569,6 +596,10 @@ export const invoicesApi = {
     api.put<WorkReport>(`/invoices/${invoiceId}/work-report`, payload, {
       params: force ? { force: 1 } : undefined,
     }).then(r => r.data),
+  saveWorkReportMaterials: (invoiceId: number, payload: WorkReportMaterialsPayload, force = false) =>
+    api.put<WorkReport>(`/invoices/${invoiceId}/work-report/materials`, payload, {
+      params: force ? { force: 1 } : undefined,
+    }).then(r => r.data),
   deleteWorkReport: (invoiceId: number, force = false) =>
     api.delete<{ deleted: true }>(`/invoices/${invoiceId}/work-report`, {
       params: force ? { force: 1 } : undefined,
@@ -597,6 +628,17 @@ export interface WorkReportItem {
   order_index: number
 }
 
+export interface WorkReportMaterial {
+  id?: number
+  description: string
+  quantity: number
+  unit: string
+  /** Cena/MJ v cenové konvenci dokladu (prices_include_vat). */
+  unit_price: number
+  total_amount?: number
+  order_index: number
+}
+
 export interface WorkReport {
   id: number
   invoice_id: number
@@ -604,17 +646,37 @@ export interface WorkReport {
   title: string
   total_hours: number
   total_amount: number
+  /** Sazba DPH práce (12/21); null = fallback default faktury. */
+  vat_rate_id: number | null
+  material_title: string | null
+  material_total: number
+  material_vat_rate_id: number | null
   items: WorkReportItem[]
+  materials: WorkReportMaterial[]
 }
 
 export interface WorkReportPayload {
   project_id: number | null
   title: string
+  vat_rate_id?: number | null
   items: Array<{
     description: string
     work_date?: string | null
     hours: number
     rate: number
+    order_index: number
+  }>
+}
+
+export interface WorkReportMaterialsPayload {
+  project_id: number | null
+  material_title: string
+  material_vat_rate_id: number | null
+  materials: Array<{
+    description: string
+    quantity: number
+    unit: string
+    unit_price: number
     order_index: number
   }>
 }

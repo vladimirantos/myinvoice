@@ -45,6 +45,7 @@ final class AiPdfExtractor
         private readonly \MyInvoice\Service\Currency\CnbExchangeRateClient $cnb,
         private readonly ImageToPdfConverter $imageToPdf,
         private readonly \MyInvoice\Repository\TaxConstantsRepository $taxConstants,
+        private readonly PurchaseInvoicePdfArchiver $pdfArchiver,
         ?LoggerInterface $logger = null,
     ) {
         $this->logger = $logger ?? new NullLogger();
@@ -1513,31 +1514,12 @@ final class AiPdfExtractor
     /**
      * Attach originální PDF bytes k vytvořené přijaté faktuře (uloží do archive,
      * setne pdf_path/hash/size na faktuře). Silent fail — pokud archive není
-     * dostupný, faktura zůstane bez PDF (lze nahrát ručně později).
+     * dostupný, faktura zůstane bez PDF (lze nahrát ručně později). Sdílená
+     * archivace přes {@see PurchaseInvoicePdfArchiver} (stejně jako dávkový import
+     * a inbox scan).
      */
     private function attachPdf(int $invoiceId, int $supplierId, string $pdfBytes, ?string $originalFilename): void
     {
-        try {
-            $archiveRoot = (string) $this->config->get('purchase_invoice.archive_storage', '');
-            if ($archiveRoot === '') {
-                $archiveRoot = \MyInvoice\Infrastructure\Config\RuntimePaths::storage('purchase-invoices');
-            }
-            $tenantDir = $archiveRoot . '/supplier-' . $supplierId;
-            if (!is_dir($tenantDir)) {
-                @mkdir($tenantDir, 0755, true);
-            }
-            $sha256 = hash('sha256', $pdfBytes);
-            $diskName = substr($sha256, 0, 16) . '.pdf';
-            $finalPath = $tenantDir . '/' . $diskName;
-            if (!is_file($finalPath)) {
-                @file_put_contents($finalPath, $pdfBytes);
-            }
-            $relativePath = 'supplier-' . $supplierId . '/' . $diskName;
-            $size = (int) @filesize($finalPath);
-            $name = $originalFilename ?: 'ai-imported.pdf';
-            $this->repo->setPdfMetadata($invoiceId, $supplierId, $relativePath, $sha256, $size, $name);
-        } catch (\Throwable) {
-            // Silent — extract success je důležitější než PDF attach.
-        }
+        $this->pdfArchiver->archiveBytes($invoiceId, $supplierId, $pdfBytes, $originalFilename ?: 'ai-imported.pdf');
     }
 }

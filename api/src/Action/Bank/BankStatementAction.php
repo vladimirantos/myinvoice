@@ -42,6 +42,17 @@ final class BankStatementAction
     /** Okno ±N dní kolem data transakce (issue_date nebo due_date faktury). */
     private const CANDIDATE_DAY_WINDOW = 14;
 
+    /** Sloučená úhrada (split): výchozí okno ±N dní pro hledání kombinací (uživatel může rozšířit). */
+    private const SPLIT_DAY_WINDOW = 7;
+    /** Sloučená úhrada: horní mez okna, kterou smí uživatel zvolit. */
+    private const SPLIT_DAY_WINDOW_MAX = 60;
+    /** Sloučená úhrada: max počet faktur v jedné kombinaci (omezení subset-sum). */
+    private const SPLIT_MAX_INVOICES = 6;
+    /** Sloučená úhrada: max velikost poolu faktur na klienta (omezení kombinatoriky). */
+    private const SPLIT_POOL_PER_CLIENT = 14;
+    /** Sloučená úhrada: max počet vrácených návrhů kombinací. */
+    private const SPLIT_MAX_SUGGESTIONS = 8;
+
     public function __construct(
         private readonly Connection $db,
         private readonly StatementImporter $importer,
@@ -66,14 +77,24 @@ final class BankStatementAction
         if (($user['role'] ?? '') !== 'admin') {
             return Json::error($response, 'forbidden', 'Pouze admin.', 403);
         }
-        $root = (string) $this->config->get('bank_import.scan_root', '');
-        if ($root === '' || !is_dir($root)) {
+        $root = trim((string) $this->config->get('bank_import.scan_root', ''));
+        if (!$this->scanConfigured()) {
             return Json::error($response, 'config_missing', 'cfg.bank_import.scan_root není nastaveno nebo adresář neexistuje.', 400);
         }
         $summary = $this->scanner->scan($root);
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('bank.scanned', $user['id'] ?? null, null, null, $summary, $ip, $request->getHeaderLine('User-Agent'));
         return Json::ok($response, $summary);
+    }
+
+    /**
+     * Je adresářové skenování bankovních výpisů nakonfigurované? (cfg.bank_import.scan_root
+     * nastaveno na existující adresář). UI podle toho zobrazuje tlačítko „Skenovat adresář".
+     */
+    private function scanConfigured(): bool
+    {
+        $root = trim((string) $this->config->get('bank_import.scan_root', ''));
+        return $root !== '' && is_dir($root);
     }
 
     public function upload(Request $request, Response $response): Response
@@ -175,8 +196,16 @@ final class BankStatementAction
         // normalizované hodnoty (REGEXP_REPLACE non-digits + TRIM leading zeros).
         $sid = SupplierGuard::currentId($request);
         $limit = 50;
-        $page = max(1, (int) ($request->getQueryParams()['page'] ?? 1));
+        $qp = $request->getQueryParams();
+        $page = max(1, (int) ($qp['page'] ?? 1));
         $offset = ($page - 1) * $limit; // int (page castnuto) → bezpečně inline do LIMIT/OFFSET
+
+        // Volitelné filtry rok/měsíc (statement_date) + číslo účtu. statement_date je
+        // u avíz-výpisů 1. den měsíce, takže YEAR()/MONTH() funguje i pro ně.
+        $filter  = (array) ($qp['filter'] ?? []);
+        $year    = isset($filter['year'])  && $filter['year']  !== '' ? (int) $filter['year']  : null;
+        $month   = isset($filter['month']) && $filter['month'] !== '' ? (int) $filter['month'] : null;
+        $account = isset($filter['account']) ? trim((string) $filter['account']) : '';
 
         // Společný scope filtr (account_number/bank_code z currencies dodavatele).
         $scopeSql = "EXISTS (
@@ -186,14 +215,39 @@ final class BankStatementAction
                        = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
                      AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
               )";
-        $countStmt = $this->db->pdo()->prepare("SELECT COUNT(*) FROM bank_statements bs WHERE $scopeSql");
-        $countStmt->execute([$sid]);
+
+        // Filtr WHERE fragment + parametry (sdílený mezi COUNT a výběrem řádků). Účet
+        // porovnáváme normalizovaně (stejně jako scope), ať padding/lomítko nevadí.
+        $filterSql = '';
+        $filterParams = [];
+        if ($year !== null)  { $filterSql .= ' AND YEAR(bs.statement_date) = ?';  $filterParams[] = $year; }
+        if ($month !== null) { $filterSql .= ' AND MONTH(bs.statement_date) = ?'; $filterParams[] = $month; }
+        if ($account !== '') {
+            $filterSql .= " AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''), '[^0-9]', ''))
+                              = TRIM(LEADING '0' FROM REGEXP_REPLACE(?, '[^0-9]', ''))";
+            $filterParams[] = $account;
+        }
+
+        $countStmt = $this->db->pdo()->prepare("SELECT COUNT(*) FROM bank_statements bs WHERE $scopeSql$filterSql");
+        $countStmt->execute(array_merge([$sid], $filterParams));
         $total = (int) $countStmt->fetchColumn();
 
         // account_label: vlastní pojmenování účtu z currencies.label (např. "CZK — Fio Bank")
         // přes scalar subselect (LIMIT 1 — sup. může mít jen 1 záznam per account_number+bank_code).
         $stmt = $this->db->pdo()->prepare(
-            "SELECT bs.id, bs.file_name, bs.account_number, bs.currency, bs.statement_date, bs.statement_number,
+            "SELECT bs.id, bs.source, bs.file_name, bs.account_number,
+                    -- Kód banky autoritativně z konfigurovaného účtu (currencies); GPC výpisy
+                    -- ho neukládají (na rozdíl od e-mailových avíz), tak ať se zobrazí všude.
+                    COALESCE(
+                      (SELECT cur.bank_code FROM currencies cur
+                        WHERE cur.supplier_id = ?
+                          AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
+                            = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
+                          AND cur.bank_code IS NOT NULL AND cur.bank_code <> ''
+                        LIMIT 1),
+                      bs.bank_code
+                    ) AS bank_code,
+                    bs.currency, bs.statement_date, bs.statement_number,
                     bs.prev_balance, bs.curr_balance, bs.transaction_count, bs.matched_count, bs.imported_at,
                     (bs.file_content IS NOT NULL) AS has_file,
                     (bs.pdf_content IS NOT NULL) AS has_pdf, bs.pdf_name,
@@ -204,17 +258,11 @@ final class BankStatementAction
                         AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
                       LIMIT 1) AS account_label
                FROM bank_statements bs
-              WHERE EXISTS (
-                  SELECT 1 FROM currencies cur
-                   WHERE cur.supplier_id = ?
-                     AND TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(cur.account_number, ''), '[^0-9]', ''))
-                       = TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''),  '[^0-9]', ''))
-                     AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
-              )
+              WHERE $scopeSql$filterSql
               ORDER BY bs.statement_date DESC, bs.id DESC
               LIMIT $limit OFFSET $offset"
         );
-        $stmt->execute([$sid, $sid]);
+        $stmt->execute(array_merge([$sid, $sid, $sid], $filterParams));
         $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         foreach ($rows as &$r) {
             $r['id'] = (int) $r['id'];
@@ -225,7 +273,58 @@ final class BankStatementAction
             $r['has_file'] = (bool) $r['has_file'];
             $r['has_pdf'] = (bool) $r['has_pdf'];
         }
-        return Json::ok($response, ['items' => $rows, 'total' => $total, 'page' => $page, 'limit' => $limit]);
+        unset($r);
+
+        // Volby pro filtry (počítané přes CELÝ scope, ne přes aktuální filtr — ať
+        // dropdowny nemizí podle zvoleného roku/účtu). Roky z statement_date,
+        // účty distinct + jejich label.
+        $yearsStmt = $this->db->pdo()->prepare(
+            "SELECT DISTINCT YEAR(bs.statement_date) AS y
+               FROM bank_statements bs WHERE $scopeSql AND bs.statement_date IS NOT NULL
+              ORDER BY y DESC"
+        );
+        $yearsStmt->execute([$sid]);
+        $years = array_values(array_filter(array_map(
+            static fn ($y) => (int) $y,
+            $yearsStmt->fetchAll(\PDO::FETCH_COLUMN)
+        )));
+
+        // Účty pro filtr bereme z CURRENCIES (konfigurované bankovní účty dodavatele),
+        // ne ze surových account_number ve výpisech — tím máme:
+        //   • každý účet právě 1× (tentýž účet chodí z avíza i z GPC v jiném formátu),
+        //   • autoritativní kód banky (na statementu může chybět, typicky u avíz),
+        //   • stejné pořadí jako v adminu (Nastavení → bankovní účty: code, výchozí, label).
+        // EXISTS jen omezí na účty, které reálně mají nějaký výpis (jinak by filtr nedával smysl).
+        $accStmt = $this->db->pdo()->prepare(
+            "SELECT cur.account_number, cur.bank_code, cur.label
+               FROM currencies cur
+              WHERE cur.supplier_id = ?
+                AND cur.account_number IS NOT NULL AND cur.account_number <> ''
+                AND EXISTS (
+                    SELECT 1 FROM bank_statements bs
+                     WHERE TRIM(LEADING '0' FROM REGEXP_REPLACE(IFNULL(bs.account_number, ''), '[^0-9]', ''))
+                         = TRIM(LEADING '0' FROM REGEXP_REPLACE(cur.account_number, '[^0-9]', ''))
+                       AND (bs.bank_code IS NULL OR cur.bank_code IS NULL OR cur.bank_code = bs.bank_code)
+                )
+              ORDER BY cur.code, cur.is_default DESC, cur.label"
+        );
+        $accStmt->execute([$sid]);
+        $accounts = array_map(static fn ($a) => [
+            'account_number' => (string) $a['account_number'],
+            'bank_code'      => $a['bank_code'] !== null ? (string) $a['bank_code'] : null,
+            'label'          => $a['label'] !== null ? (string) $a['label'] : null,
+        ], $accStmt->fetchAll(\PDO::FETCH_ASSOC));
+
+        return Json::ok($response, [
+            'items' => $rows,
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+            'years' => $years,
+            'accounts' => $accounts,
+            // Adresářové skenování je nastavené? UI podle toho zobrazí tlačítko „Skenovat adresář".
+            'scan_configured' => $this->scanConfigured(),
+        ]);
     }
 
     /**
@@ -255,7 +354,7 @@ final class BankStatementAction
         // Supplier scope check — stejný pattern jako detail()
         $pdo = $this->db->pdo();
         $owned = $pdo->prepare(
-            "SELECT bs.file_name FROM bank_statements bs
+            "SELECT bs.file_name, bs.source, bs.matched_count FROM bank_statements bs
               WHERE bs.id = ?
                 AND EXISTS (
                   SELECT 1 FROM currencies cur
@@ -266,9 +365,33 @@ final class BankStatementAction
                 )"
         );
         $owned->execute([$id, $sid]);
-        $fileName = $owned->fetchColumn();
-        if ($fileName === false) {
+        $ownedRow = $owned->fetch(\PDO::FETCH_ASSOC);
+        if ($ownedRow === false) {
             return Json::error($response, 'not_found', 'Výpis nenalezen.', 404);
+        }
+        $fileName = (string) $ownedRow['file_name'];
+
+        // Avízo-výpis (e-mailová bankovní avíza) smí jít smazat jen když na něm nezbývá
+        // žádná spárovaná položka — typicky poté, co párování převzal oficiální GPC výpis
+        // (EmailNoticeReconciler). Smazání výpisu se spárovanými transakcemi by jinak
+        // osiřelo zaplacené faktury (invoice_payments.bank_transaction_id je ON DELETE
+        // SET NULL → platba zůstane, ztratí ale vazbu; payment_matches CASCADE → vazba
+        // přijaté faktury zmizí úplně). U GPC chování neměníme.
+        // Počítáme ŽIVĚ (ne uložený matched_count) — odolné vůči stale hodnotě.
+        if ((string) $ownedRow['source'] === 'email_notice') {
+            $matchedLive = (int) $pdo->query(
+                "SELECT COUNT(*) FROM bank_transactions
+                  WHERE statement_id = " . (int) $id . "
+                    AND match_status IN ('auto_exact','auto_partial','manual')"
+            )->fetchColumn();
+            if ($matchedLive > 0) {
+                return Json::error(
+                    $response,
+                    'has_matches',
+                    'Avízo-výpis má spárované položky. Nejdřív je rozpáruj (nebo nech převzít oficiálním GPC výpisem).',
+                    409
+                );
+            }
         }
 
         $pdo->prepare('DELETE FROM bank_statements WHERE id = ?')->execute([$id]);
@@ -371,6 +494,14 @@ final class BankStatementAction
         $sid = SupplierGuard::currentId($request);
         if (!$this->statementOwned($id, $sid)) {
             return Json::error($response, 'not_found', 'Výpis nenalezen.', 404);
+        }
+
+        // Avízo-výpis (virtuální, složený z e-mailových bankovních avíz) nemá originální
+        // PDF — přikládání PDF u něj nedává smysl. UI tlačítko skrývá, server pro jistotu blokuje.
+        $srcStmt = $this->db->pdo()->prepare('SELECT source FROM bank_statements WHERE id = ?');
+        $srcStmt->execute([$id]);
+        if ((string) $srcStmt->fetchColumn() === 'email_notice') {
+            return Json::error($response, 'unsupported', 'K avízo-výpisu nelze přikládat PDF.', 400);
         }
 
         $file = $request->getUploadedFiles()['file'] ?? null;
@@ -512,7 +643,7 @@ final class BankStatementAction
         // se to dostane do json_encode. Místo toho exposujeme jen `has_file` flag,
         // bajty se stahují přes /download endpoint.
         $stmt = $this->db->pdo()->prepare(
-            "SELECT bs.id, bs.file_name, bs.file_hash, bs.account_number, bs.bank_code,
+            "SELECT bs.id, bs.source, bs.file_name, bs.file_hash, bs.account_number, bs.bank_code,
                     bs.currency, bs.statement_number, bs.statement_date,
                     bs.prev_balance, bs.curr_balance, bs.credit_total, bs.debit_total,
                     bs.transaction_count, bs.matched_count,
@@ -542,22 +673,63 @@ final class BankStatementAction
         $txStmt = $this->db->pdo()->prepare(
             'SELECT bt.*, i.varsymbol AS matched_varsymbol, i.amount_to_pay AS matched_invoice_amount,
                     i.client_id, c.company_name AS matched_client_name,
-                    (SELECT pm.purchase_invoice_id FROM payment_matches pm
-                      WHERE pm.bank_transaction_id = bt.id ORDER BY pm.id LIMIT 1) AS matched_purchase_invoice_id
+                    pm.purchase_invoice_id AS matched_purchase_invoice_id,
+                    COALESCE(NULLIF(p.vendor_invoice_number, \'\'), p.varsymbol) AS matched_purchase_ref,
+                    vc.company_name AS matched_vendor_name
                FROM bank_transactions bt
           LEFT JOIN invoices i ON i.id = bt.matched_invoice_id
           LEFT JOIN clients c ON c.id = i.client_id
+          LEFT JOIN (SELECT bank_transaction_id, MIN(id) AS min_id
+                       FROM payment_matches GROUP BY bank_transaction_id) pmx
+                 ON pmx.bank_transaction_id = bt.id
+          LEFT JOIN payment_matches pm ON pm.id = pmx.min_id
+          LEFT JOIN purchase_invoices p ON p.id = pm.purchase_invoice_id
+          LEFT JOIN clients vc ON vc.id = p.vendor_id
               WHERE bt.statement_id = ?
            ORDER BY bt.posted_at, bt.id'
         );
         $txStmt->execute([$id]);
         $transactions = $txStmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        // Sloučená úhrada (split): jedna transakce může mít platby na VÍCE vystavených
+        // faktur (migrace 0119). Doplň seznam spárovaných faktur z invoice_payments —
+        // u běžného 1:1 párování je v něm jeden prvek, u splitu víc. Zdroj pravdy pro
+        // zobrazení, kdo všechno byl touto platbou uhrazen.
+        $matchedByTx = [];
+        $txIds = array_map(static fn ($t) => (int) $t['id'], $transactions);
+        if ($txIds !== []) {
+            $ph = implode(',', array_fill(0, count($txIds), '?'));
+            $mp = $this->db->pdo()->prepare(
+                "SELECT p.bank_transaction_id AS tx_id, p.invoice_id, p.amount,
+                        i.varsymbol, i.invoice_type, c.company_name AS client_name
+                   FROM invoice_payments p
+                   JOIN invoices i ON i.id = p.invoice_id
+              LEFT JOIN clients c ON c.id = i.client_id
+                  WHERE p.bank_transaction_id IN ($ph)
+               ORDER BY p.id"
+            );
+            $mp->execute($txIds);
+            foreach ($mp->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+                $matchedByTx[(int) $r['tx_id']][] = [
+                    'invoice_id'   => (int) $r['invoice_id'],
+                    'varsymbol'    => $r['varsymbol'] !== null ? (string) $r['varsymbol'] : null,
+                    'invoice_type' => (string) $r['invoice_type'],
+                    'amount'       => (float) $r['amount'],
+                    'client_name'  => $r['client_name'] !== null ? (string) $r['client_name'] : null,
+                ];
+            }
+        }
+
         foreach ($transactions as &$t) {
             $t['id'] = (int) $t['id'];
             $t['amount'] = (float) $t['amount'];
             $t['matched_invoice_id'] = $t['matched_invoice_id'] !== null ? (int) $t['matched_invoice_id'] : null;
             $t['matched_purchase_invoice_id'] = $t['matched_purchase_invoice_id'] !== null ? (int) $t['matched_purchase_invoice_id'] : null;
+            $t['matched_purchase_ref'] = isset($t['matched_purchase_ref']) && $t['matched_purchase_ref'] !== null ? (string) $t['matched_purchase_ref'] : null;
+            $t['matched_vendor_name'] = isset($t['matched_vendor_name']) && $t['matched_vendor_name'] !== null ? (string) $t['matched_vendor_name'] : null;
+            $t['matched_invoices'] = $matchedByTx[$t['id']] ?? [];
         }
+        unset($t);
         $s['id'] = (int) $s['id'];
         $s['has_file'] = (bool) ($s['has_file'] ?? false);
         $s['has_pdf'] = (bool) ($s['has_pdf'] ?? false);
@@ -886,6 +1058,347 @@ final class BankStatementAction
         return Json::ok($response, ['candidates' => $candidates]);
     }
 
+    /**
+     * Návrhy sloučené úhrady: jedna PŘÍCHOZÍ platba pokrývá VÍCE vystavených faktur
+     * (klient zaplatil 2+ faktur jednou platbou, součet sedí, VS nesedí).
+     *
+     * GET /api/bank-transactions/{id}/split-suggestions?invoice_id=&window=&max=
+     *   → { suggestions: [{ client_id, client_name, total, currency, count, invoices: [...] }], window, max }
+     *
+     * Tvrdé omezení: kombinace jen v rámci JEDNOHO klienta (client_id). Default okno
+     * ±7 dní kolem data platby (rozšiřitelné). Klient s názvem podobným protistraně se
+     * řadí první. Volitelná „kotva" invoice_id = uživatel už jednu fakturu vybral a
+     * částka nesedí → dohledáme další faktury TÉHOŽ klienta, aby součet seděl.
+     */
+    public function splitSuggestions(Request $request, Response $response, array $args): Response
+    {
+        $txId = (int) ($args['id'] ?? 0);
+        if (!$this->txBelongsToCurrentSupplier($request, $txId)) {
+            return Json::error($response, 'not_found', 'Transakce nenalezena.', 404);
+        }
+
+        $sid = SupplierGuard::currentId($request);
+        $pdo = $this->db->pdo();
+
+        $q = $request->getQueryParams();
+        $window = (int) ($q['window'] ?? self::SPLIT_DAY_WINDOW);
+        $window = max(1, min(self::SPLIT_DAY_WINDOW_MAX, $window));
+        $maxInv = (int) ($q['max'] ?? self::SPLIT_MAX_INVOICES);
+        $maxInv = max(2, min(self::SPLIT_MAX_INVOICES, $maxInv));
+        $anchorId = (int) ($q['invoice_id'] ?? 0);
+
+        // Efektivní měna transakce + částka (jen příchozí — split je sloučená úhrada NÁM).
+        $stmt = $pdo->prepare(
+            "SELECT bt.amount, bt.posted_at, bt.counterparty_name,
+                    UPPER(COALESCE(NULLIF(bt.currency,''), NULLIF(bs.currency,''), 'CZK')) AS ccy
+               FROM bank_transactions bt
+               JOIN bank_statements bs ON bs.id = bt.statement_id
+              WHERE bt.id = ?"
+        );
+        $stmt->execute([$txId]);
+        $tx = $stmt->fetch(\PDO::FETCH_ASSOC) ?: [];
+        $txAmount = round((float) ($tx['amount'] ?? 0), 2);
+        if ($txAmount <= 0.0) {
+            // Sloučená úhrada dává smysl jen u příchozí platby (klient platí nám).
+            return Json::ok($response, ['suggestions' => [], 'window' => $window, 'max' => $maxInv]);
+        }
+        $posted = (string) ($tx['posted_at'] ?? date('Y-m-d'));
+        $txCcy  = (string) ($tx['ccy'] ?? 'CZK');
+        $cpName = (string) ($tx['counterparty_name'] ?? '');
+
+        // Kotva: omez na klienta vybrané faktury (musí patřit tenantovi a být otevřená).
+        $anchorClientId = 0;
+        if ($anchorId > 0) {
+            $a = $pdo->prepare(
+                "SELECT client_id FROM invoices
+                  WHERE id = ? AND supplier_id = ?
+                    AND status IN ('issued','sent','reminded','paid')
+                    AND invoice_type IN ('invoice','proforma')"
+            );
+            $a->execute([$anchorId, $sid]);
+            $anchorClientId = (int) $a->fetchColumn();
+            if ($anchorClientId <= 0) {
+                return Json::ok($response, ['suggestions' => [], 'window' => $window, 'max' => $maxInv]);
+            }
+        }
+
+        // Pool: vystavené faktury v okně ±window dní. Zahrnuje i ZAPLACENÉ — u nich jde
+        // o rekonciliaci (navázat existující platbu na transakci), proto k nim tahám
+        // sumu+počet dosud nenavázaných plateb (bank_transaction_id IS NULL). Částku
+        // NEfiltrujeme v SQL (efektivní příspěvek se počítá v PHP — kvůli cizí měně + paid).
+        $sql = "SELECT i.id, i.client_id, i.varsymbol AS ref, i.amount_to_pay, i.paid_total, i.status,
+                       i.exchange_rate, i.issue_date, i.due_date, cur.code AS currency,
+                       c.company_name AS party,
+                       (SELECT COALESCE(SUM(ip.amount), 0) FROM invoice_payments ip
+                         WHERE ip.invoice_id = i.id AND ip.bank_transaction_id IS NULL) AS reconcilable,
+                       (SELECT COUNT(*) FROM invoice_payments ip
+                         WHERE ip.invoice_id = i.id AND ip.bank_transaction_id IS NULL) AS reconcilable_count
+                  FROM invoices i
+                  JOIN currencies cur ON cur.id = i.currency_id
+             LEFT JOIN clients c ON c.id = i.client_id
+                 WHERE i.supplier_id = ?
+                   AND i.client_id IS NOT NULL
+                   AND i.status IN ('issued','sent','reminded','paid')
+                   AND i.invoice_type IN ('invoice','proforma')
+                   AND (ABS(DATEDIFF(i.due_date, ?)) <= ? OR ABS(DATEDIFF(i.issue_date, ?)) <= ?)";
+        $params = [$sid, $posted, $window, $posted, $window];
+        if ($anchorClientId > 0) {
+            $sql .= " AND i.client_id = ?";
+            $params[] = $anchorClientId;
+        }
+        $sql .= " ORDER BY ABS(DATEDIFF(COALESCE(i.due_date, i.issue_date), ?)) ASC, i.id DESC LIMIT 600";
+        $params[] = $posted;
+        $ps = $pdo->prepare($sql);
+        $ps->execute($params);
+
+        // Seskup do klientů + přepočti zbytek do měny transakce.
+        $byClient = [];      // client_id => list of item
+        $anchorItem = null;
+        foreach ($ps->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $remaining = round((float) $r['amount_to_pay'] - (float) $r['paid_total'], 2);
+            $isPaid    = (string) $r['status'] === 'paid' || $remaining <= self::CANDIDATE_AMOUNT_TOLERANCE;
+            if ($isPaid) {
+                // Zaplacená faktura → rekonciliace: efektivní příspěvek = dosud nenavázaná
+                // platba. Nabízíme jen když existuje PRÁVĚ JEDNA (jinak nejednoznačné /
+                // už spárované s jinou transakcí — viz reconcileToBankTransaction).
+                if ((int) ($r['reconcilable_count'] ?? 0) !== 1) {
+                    continue;
+                }
+                $effective = round((float) ($r['reconcilable'] ?? 0), 2);
+            } else {
+                $effective = $remaining;
+            }
+            if ($effective <= 0) {
+                continue;
+            }
+            $invCcy = strtoupper((string) $r['currency']);
+            $rate   = (float) ($r['exchange_rate'] ?: 0);
+            $conv   = $this->remainingInTxCurrency($effective, $invCcy, $rate, $txCcy);
+            if ($conv === null) {
+                continue; // cizoměnový účet × jiná měna faktury bez kurzu → nepřevedeme
+            }
+            $cid = (int) $r['client_id'];
+            $item = [
+                'id'              => (int) $r['id'],
+                'ref'             => ($r['ref'] ?? '') !== '' ? (string) $r['ref'] : null,
+                'amount'          => $effective,
+                'currency'        => $invCcy,
+                'converted'       => round($conv, 2),
+                'is_fx'           => $invCcy !== $txCcy,
+                'is_paid'         => $isPaid,
+                'issue_date'      => $r['issue_date'],
+                'due_date'        => $r['due_date'],
+                'party'           => $r['party'] !== null ? (string) $r['party'] : null,
+            ];
+            $byClient[$cid][] = $item;
+            if ($anchorId > 0 && $item['id'] === $anchorId) {
+                $anchorItem = $item;
+            }
+        }
+        if ($anchorId > 0 && $anchorItem === null) {
+            return Json::ok($response, ['suggestions' => [], 'window' => $window, 'max' => $maxInv]);
+        }
+
+        $suggestions = [];
+        foreach ($byClient as $cid => $items) {
+            // Pool na klienta omezíme (pořadí už dle blízkosti data); kotvu vždy ponecháme.
+            if (count($items) > self::SPLIT_POOL_PER_CLIENT) {
+                if ($anchorItem !== null) {
+                    $items = array_values(array_filter($items, static fn ($x) => $x['id'] !== $anchorId));
+                    $items = array_slice($items, 0, self::SPLIT_POOL_PER_CLIENT - 1);
+                    $items[] = $anchorItem;
+                } else {
+                    $items = array_slice($items, 0, self::SPLIT_POOL_PER_CLIENT);
+                }
+            }
+            $hasFx = false;
+            foreach ($items as $it) {
+                if ($it['is_fx']) { $hasFx = true; break; }
+            }
+            $tol = max(self::CANDIDATE_AMOUNT_TOLERANCE, $hasFx ? $txAmount * self::CANDIDATE_FX_TOLERANCE_PCT : 0.0);
+
+            if ($anchorItem !== null) {
+                // Kotva fixní: dohledej kombinace ZBYTKU (1..max-1) na (cíl − kotva).
+                $rest = array_values(array_filter($items, static fn ($x) => $x['id'] !== $anchorId));
+                $combos = $this->findSubsetsSummingTo($rest, $txAmount - $anchorItem['converted'], $tol, 1, $maxInv - 1);
+                foreach ($combos as $combo) {
+                    array_unshift($combo, $anchorItem);
+                    $suggestions[] = $this->buildSuggestion($cid, $combo, $txCcy, $cpName, $items[0]['party'] ?? null, $txAmount, $posted);
+                }
+            } else {
+                $combos = $this->findSubsetsSummingTo($items, $txAmount, $tol, 2, $maxInv);
+                foreach ($combos as $combo) {
+                    $suggestions[] = $this->buildSuggestion($cid, $combo, $txCcy, $cpName, $items[0]['party'] ?? null, $txAmount, $posted);
+                }
+            }
+        }
+
+        // Řazení: shoda jména protistrany (desc), méně faktur, faktury blíž datu platby
+        // (víc kombinací se stejným součtem vzniká, když mají faktury shodné částky —
+        // preferuj tu „nejbližší", ne náhodnou s daleko splatnou fakturou), menší odchylka.
+        usort($suggestions, static function (array $a, array $b): int {
+            return ($b['_name_sim'] <=> $a['_name_sim'])
+                ?: ($a['count'] <=> $b['count'])
+                ?: ($a['_date_dist'] <=> $b['_date_dist'])
+                ?: ($a['_diff'] <=> $b['_diff']);
+        });
+        $suggestions = array_slice($suggestions, 0, self::SPLIT_MAX_SUGGESTIONS);
+        foreach ($suggestions as &$s) {
+            unset($s['_name_sim'], $s['_diff'], $s['_date_dist']);
+        }
+        unset($s);
+
+        return Json::ok($response, ['suggestions' => $suggestions, 'window' => $window, 'max' => $maxInv]);
+    }
+
+    /**
+     * Sestaví návrh kombinace pro odpověď (+ pomocná pole pro řazení).
+     * @param list<array<string,mixed>> $combo
+     */
+    private function buildSuggestion(int $clientId, array $combo, string $txCcy, string $cpName, ?string $party, float $target, string $posted): array
+    {
+        $total = 0.0;
+        $invoices = [];
+        $dateDist = 0.0;
+        $postedTs = strtotime($posted) ?: 0;
+        foreach ($combo as $it) {
+            $total += (float) $it['converted'];
+            $ref = $it['due_date'] ?? $it['issue_date'] ?? null;
+            if ($ref !== null && $postedTs > 0) {
+                $refTs = strtotime((string) $ref);
+                if ($refTs !== false) {
+                    $dateDist += abs($refTs - $postedTs) / 86400;
+                }
+            }
+            $invoices[] = [
+                'id'         => $it['id'],
+                'ref'        => $it['ref'],
+                'amount'     => $it['amount'],
+                'currency'   => $it['currency'],
+                'converted'  => $it['is_fx'] ? $it['converted'] : null,
+                'is_paid'    => (bool) ($it['is_paid'] ?? false),
+                'issue_date' => $it['issue_date'],
+                'due_date'   => $it['due_date'],
+            ];
+        }
+        return [
+            'client_id'   => $clientId,
+            'client_name' => $party,
+            'currency'    => $txCcy,
+            'total'       => round($total, 2),
+            'count'       => count($invoices),
+            'invoices'    => $invoices,
+            '_name_sim'   => $this->nameSimilarity($cpName, (string) $party),
+            '_diff'       => abs(round($total, 2) - $target),
+            '_date_dist'  => round($dateDist, 2),
+        ];
+    }
+
+    /**
+     * Zbytek faktury přepočtený do měny transakce (mirror txAmountInInvoiceCurrency,
+     * opačný směr): stejná měna → přímo; CZK transakce × cizoměnová faktura → ×kurz;
+     * cizoměnový účet × jiná měna faktury bez kurzu → null (nepřevedeme).
+     */
+    private function remainingInTxCurrency(float $remaining, string $invCcy, float $rate, string $txCcy): ?float
+    {
+        $invCcy = strtoupper($invCcy);
+        $txCcy  = strtoupper($txCcy);
+        if ($invCcy === $txCcy) {
+            return $remaining;
+        }
+        // Cizoměnová faktura placená v CZK → přepočet kurzem faktury. Bez platného kurzu
+        // NEpřevádíme (žádný tichý fallback 1:1 — to by vyrobilo nesmyslnou částku platby).
+        if ($txCcy === 'CZK' && $rate > 0) {
+            return $remaining * $rate;
+        }
+        return null;
+    }
+
+    /**
+     * Najde kombinace položek, jejichž součet `converted` ≈ target (±tol), o velikosti
+     * minSize..maxSize. DFS s prořezáváním (položky setříděné sestupně). Vrací list
+     * kombinací (každá = list položek). Omezeno na rozumný počet řešení.
+     *
+     * @param list<array<string,mixed>> $items
+     * @return list<list<array<string,mixed>>>
+     */
+    private function findSubsetsSummingTo(array $items, float $target, float $tol, int $minSize, int $maxSize): array
+    {
+        if ($target <= -$tol || $maxSize < $minSize || $minSize < 1) {
+            return [];
+        }
+        // Sestupně dle converted → dřívější prořezání při překročení cíle.
+        usort($items, static fn ($a, $b) => $b['converted'] <=> $a['converted']);
+        $n = count($items);
+        $results = [];
+        $limit = 30; // strop řešení (anti-exploze u stejných částek)
+
+        $dfs = function (int $start, array $picked, float $sum) use (&$dfs, &$results, $items, $n, $target, $tol, $minSize, $maxSize, $limit): void {
+            if (count($results) >= $limit) {
+                return;
+            }
+            if ($sum > $target + $tol) {
+                return; // všechny converted > 0 → další přidání jen zvýší součet
+            }
+            if (count($picked) >= $minSize && abs($sum - $target) <= $tol) {
+                $results[] = $picked;
+                // pokračujeme dál — můžou být jiné kombinace, ale tuhle nerozšiřujeme
+                return;
+            }
+            if (count($picked) >= $maxSize) {
+                return;
+            }
+            for ($i = $start; $i < $n; $i++) {
+                $next = $picked;
+                $next[] = $items[$i];
+                $dfs($i + 1, $next, $sum + (float) $items[$i]['converted']);
+                if (count($results) >= $limit) {
+                    return;
+                }
+            }
+        };
+        $dfs(0, [], 0.0);
+        return $results;
+    }
+
+    /**
+     * Podobnost dvou názvů firem (0..1) — Jaccard překryv normalizovaných tokenů.
+     * Mirror StatementMatcher::nameSimilarity (sdílený význam pro fuzzy shodu protistrany).
+     */
+    private function nameSimilarity(string $a, string $b): float
+    {
+        $ta = $this->nameTokens($a);
+        $tb = $this->nameTokens($b);
+        if (!$ta || !$tb) {
+            return 0.0;
+        }
+        $inter = array_intersect($ta, $tb);
+        $union = array_unique(array_merge($ta, $tb));
+        return count($union) > 0 ? count($inter) / count($union) : 0.0;
+    }
+
+    /**
+     * Normalizace názvu na tokeny (mirror StatementMatcher::nameTokens).
+     * @return list<string>
+     */
+    private function nameTokens(string $name): array
+    {
+        $s = mb_strtoupper($name, 'UTF-8');
+        $s = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $s) ?: $s;
+        $s = preg_replace('/[^A-Z0-9]+/', ' ', $s) ?? '';
+        $stop = ['SRO', 'AS', 'INC', 'LTD', 'LLC', 'GMBH', 'VOS', 'SPOL', 'THE', 'AND',
+                 'CZ', 'CZE', 'SK', 'SVK', 'DE', 'DEU', 'NL', 'NLD', 'USA', 'GBR', 'AT', 'AUT',
+                 'PRAHA', 'PRAGUE', 'BRNO', 'PLZEN', 'OSTRAVA'];
+        $tokens = [];
+        foreach (preg_split('/\s+/', trim($s)) as $tok) {
+            if (strlen($tok) < 3 || in_array($tok, $stop, true)) {
+                continue;
+            }
+            $tokens[] = $tok;
+        }
+        return array_values(array_unique($tokens));
+    }
+
     public function manualMatch(Request $request, Response $response, array $args): Response
     {
         $txId = (int) ($args['id'] ?? 0);
@@ -897,6 +1410,20 @@ final class BankStatementAction
         $invoiceId = (int) ($body['invoice_id'] ?? 0);
         $purchaseInvoiceId = (int) ($body['purchase_invoice_id'] ?? 0);
         $varsymbol = trim((string) ($body['varsymbol'] ?? ''));
+
+        // Sloučená úhrada (split): jedna příchozí platba → více vystavených faktur.
+        if (isset($body['invoice_ids']) && is_array($body['invoice_ids'])) {
+            $ids = array_values(array_unique(array_filter(
+                array_map('intval', $body['invoice_ids']),
+                static fn (int $v): bool => $v > 0,
+            )));
+            if (count($ids) >= 2) {
+                return $this->manualMatchSplit($request, $response, $txId, $ids);
+            }
+            if (count($ids) === 1) {
+                $invoiceId = $ids[0]; // degraduj na běžné 1:1 párování
+            }
+        }
 
         // Purchase invoice match (přijatá faktura — outgoing payment)
         if ($purchaseInvoiceId > 0) {
@@ -1119,6 +1646,277 @@ final class BankStatementAction
             return round($txAmount / $r, 2);
         }
         return round($fallback, 2);
+    }
+
+    /**
+     * Sloučená úhrada: jedna PŘÍCHOZÍ platba pokryje VÍCE vystavených faktur naráz
+     * (klient zaplatil 2+ faktur jednou platbou, součet sedí, VS nesedí).
+     *
+     * Pravidla (potvrzeno se zadavatelem):
+     *   - jen příchozí platba (amount > 0); přijaté faktury split neřeší (mají vlastní cestu);
+     *   - VŠECHNY faktury musí patřit STEJNÉMU klientovi (tvrdý guard i v potvrzení);
+     *   - každá faktura se uhradí svým PLNÝM zbytkem → součet zbytků (v měně platby) musí
+     *     ≈ částka platby (tolerance jako u kandidátů). Žádné částečné rozpouštění platby.
+     *
+     * Každá faktura dostane řádek v invoice_payments se stejným bank_transaction_id
+     * (migrace 0119 uvolnila UNIQUE na (bank_transaction_id, invoice_id)). Zaplacená
+     * proforma → DRAFT finální faktury. bank_transactions.matched_invoice_id ukazuje na
+     * první fakturu (kvůli kompatibilitě UI/odpárování); úplný seznam drží invoice_payments.
+     *
+     * @param list<int> $invoiceIds
+     */
+    private function manualMatchSplit(Request $request, Response $response, int $txId, array $invoiceIds): Response
+    {
+        $sid = SupplierGuard::currentId($request);
+        $pdo = $this->db->pdo();
+        $userId = (int) (((array) $request->getAttribute(AuthMiddleware::ATTR_USER, []))['id'] ?? 0);
+
+        // Transakce — jen příchozí (sloučená úhrada nám).
+        $tx = $pdo->prepare(
+            'SELECT bt.posted_at, bt.statement_id, bt.amount, bt.variable_symbol, bt.bank_ref,
+                    UPPER(COALESCE(NULLIF(bt.currency, ""), NULLIF(bs.currency, ""), "CZK")) AS tx_currency
+               FROM bank_transactions bt
+               JOIN bank_statements bs ON bs.id = bt.statement_id
+              WHERE bt.id = ?'
+        );
+        $tx->execute([$txId]);
+        $txRow = $tx->fetch(\PDO::FETCH_ASSOC) ?: [];
+        $txAmount = round((float) ($txRow['amount'] ?? 0), 2);
+        if ($txAmount <= 0.0) {
+            return Json::error($response, 'not_incoming',
+                'Sloučenou úhradu lze spárovat jen u příchozí (kladné) platby.', 400);
+        }
+        $postedAt = (string) ($txRow['posted_at'] ?? date('Y-m-d'));
+        $statementId = (int) ($txRow['statement_id'] ?? 0);
+        $txCcy = (string) ($txRow['tx_currency'] ?? 'CZK');
+
+        // Načti vybrané faktury (supplier scope). Pořadí dle vstupu.
+        $place = implode(',', array_fill(0, count($invoiceIds), '?'));
+        $stmt = $pdo->prepare(
+            "SELECT i.id, i.supplier_id, i.invoice_type, i.status, i.client_id,
+                    i.amount_to_pay, i.paid_total, i.exchange_rate, cur.code AS currency,
+                    (SELECT COALESCE(SUM(ip.amount), 0) FROM invoice_payments ip
+                      WHERE ip.invoice_id = i.id AND ip.bank_transaction_id IS NULL) AS reconcilable,
+                    (SELECT COUNT(*) FROM invoice_payments ip
+                      WHERE ip.invoice_id = i.id AND ip.bank_transaction_id IS NULL) AS reconcilable_count
+               FROM invoices i
+               JOIN currencies cur ON cur.id = i.currency_id
+              WHERE i.id IN ($place)"
+        );
+        $stmt->execute($invoiceIds);
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC) ?: [];
+        $byId = [];
+        foreach ($rows as $r) {
+            $byId[(int) $r['id']] = $r;
+        }
+
+        $clientId = null;
+        $sumConverted = 0.0;
+        $hasFx = false;
+        $toPay = [];      // id => částka k úhradě v měně faktury (jen NEzaplacené → recordPayment)
+        $reconcile = [];  // id => true (ZAPLACENÁ faktura → jen navázat existující platbu)
+        $convById = [];   // id => příspěvek faktury v měně platby (pro re-validaci pod zámkem)
+        foreach ($invoiceIds as $iid) {
+            $inv = $byId[$iid] ?? null;
+            if ($inv === null || (int) $inv['supplier_id'] !== $sid) {
+                return Json::error($response, 'invoice_not_found', "Faktura #$iid nenalezena.", 404);
+            }
+            if (!in_array((string) $inv['invoice_type'], ['invoice', 'proforma'], true)) {
+                return Json::error($response, 'invalid_type',
+                    "Doklad #$iid není faktura ani zálohová faktura.", 409);
+            }
+            if (!in_array((string) $inv['status'], ['issued', 'sent', 'reminded', 'paid'], true)) {
+                return Json::error($response, 'invalid_status',
+                    "Fakturu #$iid v jejím stavu nelze takto spárovat.", 409);
+            }
+            $cid = $inv['client_id'] !== null ? (int) $inv['client_id'] : 0;
+            if ($cid <= 0) {
+                return Json::error($response, 'no_client', "Faktura #$iid nemá klienta.", 409);
+            }
+            if ($clientId === null) {
+                $clientId = $cid;
+            } elseif ($cid !== $clientId) {
+                return Json::error($response, 'client_mismatch',
+                    'Sloučená úhrada musí být v rámci jednoho klienta.', 409);
+            }
+            $remaining = round((float) $inv['amount_to_pay'] - (float) $inv['paid_total'], 2);
+            $isPaid = (string) $inv['status'] === 'paid' || $remaining <= self::CANDIDATE_AMOUNT_TOLERANCE;
+            if ($isPaid) {
+                // Zaplacená faktura → rekonciliace (navázat existující platbu, žádné dvojí
+                // zdanění/přeplacení). Vyžaduje právě jednu dosud nenavázanou platbu.
+                if ((int) ($inv['reconcilable_count'] ?? 0) !== 1) {
+                    return Json::error($response, 'cannot_reconcile',
+                        "Fakturu #$iid nelze rekonciliovat (nemá právě jednu nenavázanou platbu).", 409);
+                }
+                $contrib = round((float) ($inv['reconcilable'] ?? 0), 2);
+                if ($contrib <= 0) {
+                    return Json::error($response, 'cannot_reconcile',
+                        "Fakturu #$iid nelze rekonciliovat (nulová nenavázaná platba).", 409);
+                }
+                $reconcile[$iid] = true;
+            } else {
+                if ($remaining <= 0) {
+                    return Json::error($response, 'nothing_to_pay', "Faktura #$iid nemá co uhradit.", 409);
+                }
+                $contrib = $remaining;
+                $toPay[$iid] = $remaining;
+            }
+            $conv = $this->remainingInTxCurrency(
+                $contrib, (string) $inv['currency'], (float) ($inv['exchange_rate'] ?: 0), $txCcy
+            );
+            if ($conv === null) {
+                return Json::error($response, 'currency_mismatch',
+                    "Fakturu #$iid nelze převést do měny platby (chybí kurz).", 409);
+            }
+            $convById[$iid] = round($conv, 2);
+            $sumConverted += $conv;
+            if (strtoupper((string) $inv['currency']) !== $txCcy) {
+                $hasFx = true;
+            }
+        }
+
+        // Guard: součet zbytků (v měně platby) musí ≈ částka platby.
+        $tol = max(self::CANDIDATE_AMOUNT_TOLERANCE, $hasFx ? $txAmount * self::CANDIDATE_FX_TOLERANCE_PCT : 0.0);
+        if (abs(round($sumConverted, 2) - $txAmount) > $tol) {
+            return Json::error($response, 'sum_mismatch',
+                'Součet faktur (' . number_format(round($sumConverted, 2), 2, ',', ' ') . ' ' . $txCcy
+                . ') neodpovídá částce platby (' . number_format($txAmount, 2, ',', ' ') . ' ' . $txCcy . ').',
+                409);
+        }
+
+        // Guard: transakce už eviduje platbu na faktuře MIMO vybranou množinu → odpárovat napřed.
+        $existing = $pdo->prepare('SELECT invoice_id FROM invoice_payments WHERE bank_transaction_id = ?');
+        $existing->execute([$txId]);
+        $alreadyPaidIds = array_map('intval', $existing->fetchAll(\PDO::FETCH_COLUMN) ?: []);
+        foreach ($alreadyPaidIds as $paidIid) {
+            if (!in_array($paidIid, $invoiceIds, true)) {
+                return Json::error($response, 'tx_already_paired',
+                    'Transakce už eviduje platbu na jiné faktuře. Nejdřív zruš stávající spárování.', 409);
+            }
+        }
+
+        $finalDraftIds = [];
+        $paidInvoiceIds = [];
+        $pdo->beginTransaction();
+        try {
+            // Anti-TOCTOU (race → přeplacení): zamkni faktury a přepočti zbytky POD ZÁMKEM.
+            // Souběžná platba (jiná tx / dvojklik / cron rematch) by jinak mohla fakturu
+            // přeplatit — guard součtu výše běžel na hodnotách načtených mimo transakci.
+            // Po zámku znovu ověříme součet; pokud se stav mezitím změnil → rollback + 409.
+            $lock = $pdo->prepare("SELECT id, amount_to_pay, paid_total FROM invoices WHERE id IN ($place) FOR UPDATE");
+            $lock->execute($invoiceIds);
+            $lockedRem = [];
+            foreach ($lock->fetchAll(\PDO::FETCH_ASSOC) as $lr) {
+                $lockedRem[(int) $lr['id']] = round((float) $lr['amount_to_pay'] - (float) $lr['paid_total'], 2);
+            }
+            $sumLocked = 0.0;
+            $newCount = 0;
+            foreach ($invoiceIds as $iid) {
+                if (in_array($iid, $alreadyPaidIds, true)) {
+                    continue; // platba už existuje (idempotence) — nezahrnuj do součtu
+                }
+                $newCount++;
+                if (isset($reconcile[$iid])) {
+                    // Zaplacená faktura: rekonciliace nemění paid_total, příspěvek je fixní
+                    // (ověřený nad nenavázanou platbou před zámkem). Žádné riziko přeplacení.
+                    $sumLocked += $convById[$iid];
+                    continue;
+                }
+                $rem = $lockedRem[$iid] ?? 0.0;
+                if ($rem <= 0) {
+                    $pdo->rollBack();
+                    return Json::error($response, 'state_changed',
+                        'Stav faktur se mezitím změnil (faktura už nemá co uhradit). Zkus párování znovu.', 409);
+                }
+                $conv = $this->remainingInTxCurrency(
+                    $rem, (string) $byId[$iid]['currency'], (float) ($byId[$iid]['exchange_rate'] ?: 0), $txCcy
+                );
+                if ($conv === null) {
+                    $pdo->rollBack();
+                    return Json::error($response, 'currency_mismatch',
+                        "Fakturu #$iid nelze převést do měny platby (chybí kurz).", 409);
+                }
+                $toPay[$iid] = $rem;
+                $sumLocked += $conv;
+            }
+            if ($newCount > 0 && abs(round($sumLocked, 2) - $txAmount) > $tol) {
+                $pdo->rollBack();
+                return Json::error($response, 'state_changed',
+                    'Stav faktur se mezitím změnil (součet už nesedí na částku platby). Zkus párování znovu.', 409);
+            }
+
+            $pdo->prepare(
+                "UPDATE bank_transactions
+                    SET matched_invoice_id = ?, match_status = 'manual', matched_at = NOW(), matched_by = ?
+                  WHERE id = ?"
+            )->execute([$invoiceIds[0], $userId ?: null, $txId]);
+
+            foreach ($invoiceIds as $iid) {
+                if (in_array($iid, $alreadyPaidIds, true)) {
+                    continue; // idempotence — platba už existuje (opakované potvrzení)
+                }
+                if (isset($reconcile[$iid])) {
+                    // Zaplacená faktura → navázat existující platbu na transakci (bez nové platby).
+                    $this->payments->reconcileToBankTransaction($iid, $txId, [
+                        'variable_symbol' => isset($txRow['variable_symbol']) ? (string) $txRow['variable_symbol'] : null,
+                        'bank_reference'  => isset($txRow['bank_ref']) ? (string) $txRow['bank_ref'] : null,
+                    ]);
+                    continue;
+                }
+                $recorded = $this->payments->recordPayment($iid, $toPay[$iid], $postedAt, [
+                    'source'              => 'bank',
+                    'bank_transaction_id' => $txId,
+                    'variable_symbol'     => isset($txRow['variable_symbol']) ? (string) $txRow['variable_symbol'] : null,
+                    'bank_reference'      => isset($txRow['bank_ref']) ? (string) $txRow['bank_ref'] : null,
+                    'created_by'          => $userId,
+                ]);
+                if ($recorded['became_paid']) {
+                    $paidInvoiceIds[] = $iid;
+                    if ((string) ($byId[$iid]['invoice_type'] ?? '') === 'proforma') {
+                        $finalDraftIds[$iid] = $this->finalCreator->create($iid, $userId ?: 0, $postedAt);
+                    }
+                }
+            }
+
+            if ($statementId > 0) {
+                $pdo->prepare(
+                    "UPDATE bank_statements
+                        SET matched_count = (
+                            SELECT COUNT(*) FROM bank_transactions
+                             WHERE statement_id = ?
+                               AND match_status IN ('auto_exact', 'auto_partial', 'manual')
+                        )
+                      WHERE id = ?"
+                )->execute([$statementId, $statementId]);
+            }
+            $pdo->commit();
+        } catch (\Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            return Json::error($response, 'match_failed', 'Sloučené párování selhalo: ' . $e->getMessage(), 500);
+        }
+
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $this->logger->log('bank.tx_manual_match_split', $userId ?: null, 'bank_transaction', $txId, [
+            'invoice_ids'     => $invoiceIds,
+            'client_id'       => $clientId,
+            'paid_at'         => $postedAt,
+            'final_draft_ids' => array_values($finalDraftIds),
+        ], $ip, $request->getHeaderLine('User-Agent'));
+
+        // Děkovné e-maily za úhradu — per faktura, best-effort (selhání nesmí rozbít spárování).
+        foreach ($paidInvoiceIds as $iid) {
+            $this->paymentThanks->sendForInvoice(
+                $iid, 'bank_match', $userId ?: null, $ip, $request->getHeaderLine('User-Agent'), requireUnsent: true,
+            );
+        }
+
+        $result = ['matched' => true, 'split' => true, 'paid_at' => $postedAt, 'invoice_ids' => $invoiceIds];
+        if ($finalDraftIds !== []) {
+            $result['final_draft_ids'] = array_values($finalDraftIds);
+        }
+        return Json::ok($response, $result);
     }
 
     /**

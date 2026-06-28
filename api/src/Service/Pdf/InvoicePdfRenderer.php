@@ -284,7 +284,10 @@ final class InvoicePdfRenderer
             'work_report'       => $this->workReports->findByInvoice((int) $invoice['id']),
             'date_format'       => $locale === 'en' ? 'M j, Y' : 'j. n. Y',
             'decimal_sep'       => $locale === 'en' ? '.' : ',',
-            'thousand_sep'      => $locale === 'en' ? ',' : ' ',
+            // Nezlomitelná mezera (NBSP, U+00A0) jako oddělovač tisíců — mPDF v úzkých
+            // číselných buňkách (Cena/j, Bez/S DPH) láme i přes white-space:nowrap; NBSP
+            // drží celé číslo „298 833,00" na jednom řádku spolehlivě.
+            'thousand_sep'      => $locale === 'en' ? ',' : "\u{00A0}",
             'css'               => $css,
             'logo_path'         => $logoPath,
             // Opt-in: vedle loga vykreslit i název firmy (migrace 0058). Jen když logo
@@ -420,6 +423,21 @@ final class InvoicePdfRenderer
             $snap = is_string($invoice['bank_snapshot']) ? json_decode($invoice['bank_snapshot'], true) : $invoice['bank_snapshot'];
             if (is_array($snap)) {
                 $row = array_merge($live, $snap);
+                // Snapshot je primární (historický stav účtu), ALE prázdná hodnota ve snapshotu
+                // nesmí přebít neprázdné live pole. Týká se hlavně `bank_name`: starší faktury
+                // se vystavily dřív, než CRPDPH enrichment doplnil název banky do currencies →
+                // snapshot má bank_name='' a array_merge ho nechá vyhrát (banka se netiskne).
+                // Název banky je jen popisek bankovního kódu, takže ho doplníme z live JEN když
+                // jde o stejný účet (shodný bank_code) — jinak by mohl popisovat jiný účet.
+                $sameAccount = (string) ($snap['bank_code'] ?? '') === (string) ($live['bank_code'] ?? '')
+                    && (string) ($snap['iban'] ?? '') === (string) ($live['iban'] ?? '');
+                if ($sameAccount) {
+                    foreach (['bank_name', 'bic'] as $k) {
+                        if (empty($row[$k]) && !empty($live[$k])) {
+                            $row[$k] = $live[$k];
+                        }
+                    }
+                }
             }
         }
         if (empty($row)) return null;
@@ -522,7 +540,9 @@ final class InvoicePdfRenderer
                 return $svgAbs;
             }
         }
-        return $abs;
+        // PNG fallback: splácni alfa kanál na bílou — mPDF neumí SMask u truecolor
+        // RGBA PNG a vykreslil by průhledné pozadí černě (issue #152).
+        return PdfLogoFlattener::flattenedPath($abs);
     }
 
     /**

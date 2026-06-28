@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Service\Bank;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Invoice\FinalFromProformaCreator;
 use MyInvoice\Service\Invoice\InvoicePaymentService;
 use MyInvoice\Service\Invoice\PaymentTaxDocumentCreator;
@@ -63,7 +64,55 @@ final class StatementMatcher
         // Daňový doklad k přijaté platbě — auto DRAFT při částečné úhradě proformy
         // (jen plátce DPH, ne-RC; creator si podmínky hlídá sám, viz catch níže).
         private readonly ?PaymentTaxDocumentCreator $taxDocCreator = null,
+        // Aktivita dokladu — zápis „payment_matched" proti vystavené i přijaté faktuře,
+        // ať je auto-spárování platby vidět v aktivitě dokladu (GPC import, e-mailové
+        // avízo, cron, rematch jdou přes match(), takže ruční logging v Action vrstvě
+        // je míjí). Nullable kvůli izolovaným konstrukcím v testech; Bootstrap injektuje.
+        private readonly ?ActivityLogger $activityLogger = null,
     ) {}
+
+    /**
+     * Zaloguj spárování platby proti dokladu (vystavená 'invoice' / přijatá
+     * 'purchase_invoice'), ať je auto-úhrada vidět v aktivitě dokladu. Volá se AŽ
+     * PO commitu (mimo transakci). Best-effort — logging nikdy nesmí shodit párování.
+     */
+    private function logPaymentMatch(
+        string $entityType,
+        int $entityId,
+        ?int $supplierId,
+        string $matchStatus,
+        float $amount,
+        string $vs,
+        int $transactionId,
+        bool $alreadyPaid = false,
+    ): void {
+        if ($this->activityLogger === null) {
+            return;
+        }
+        try {
+            $this->activityLogger->log(
+                $entityType . '.payment_matched',
+                null,
+                $entityType,
+                $entityId,
+                [
+                    'match'               => $matchStatus,
+                    'amount'              => round($amount, 2),
+                    'variable_symbol'     => $vs !== '' ? $vs : null,
+                    'bank_transaction_id' => $transactionId,
+                    'source'              => 'bank',
+                    'already_paid'        => $alreadyPaid ?: null,
+                ],
+                null,
+                null,
+                // purchase_invoice ActivityLogger sám neresolvuje → předáváme supplier
+                // explicitně; pro 'invoice' se doplní auto z entity (může být null).
+                $supplierId,
+            );
+        } catch (\Throwable) {
+            // logging nesmí rozbít párování
+        }
+    }
 
     /**
      * Očekávaná částka faktury vyjádřená v měně transakce + tolerance (exact, partial).
@@ -316,6 +365,8 @@ final class StatementMatcher
                 $this->paymentThanks?->sendForInvoice((int) $inv['id'], 'bank_match', null, null, null, requireUnsent: true);
             }
 
+            $this->logPaymentMatch('invoice', (int) $inv['id'], null, 'auto_exact', $amount, (string) $vs, $transactionId, $alreadyPaid);
+
             $result = ['status' => 'auto_exact', 'invoice_id' => (int) $inv['id'], 'varsymbol' => $vs];
             if ($finalDraftId !== null) {
                 $result['final_draft_id'] = $finalDraftId;
@@ -362,6 +413,8 @@ final class StatementMatcher
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
+            $this->logPaymentMatch('invoice', (int) $inv['id'], null, 'auto_partial', $amount, (string) $vs, $transactionId);
+
             $result = [
                 'status'          => 'auto_partial',
                 'invoice_id'      => (int) $inv['id'],
@@ -481,6 +534,8 @@ final class StatementMatcher
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
+            $this->logPaymentMatch('purchase_invoice', (int) $pi['id'], $supplierId, 'auto_exact', $absAmount, (string) $vs, $transactionId, $alreadyPaid);
+
             $result = ['status' => 'auto_exact', 'purchase_invoice_id' => (int) $pi['id'], 'varsymbol' => $vs];
             if ($alreadyPaid) {
                 $result['already_paid'] = true;
@@ -508,6 +563,8 @@ final class StatementMatcher
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
+            $this->logPaymentMatch('purchase_invoice', (int) $pi['id'], $supplierId, 'auto_partial', $absAmount, (string) $vs, $transactionId);
+
             return [
                 'status' => 'auto_partial',
                 'purchase_invoice_id' => (int) $pi['id'],
@@ -572,6 +629,8 @@ final class StatementMatcher
             if ($pdo->inTransaction()) $pdo->rollBack();
             throw $e;
         }
+        $this->logPaymentMatch('purchase_invoice', (int) $pi['id'], $supplierId, 'auto_partial', $absAmount, '', $transactionId);
+
         return ['status' => 'auto_partial', 'purchase_invoice_id' => (int) $pi['id'], 'fuzzy' => true];
     }
 

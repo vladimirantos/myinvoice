@@ -13,6 +13,7 @@ import TopProjectsBarChart from '@/components/charts/TopProjectsBarChart.vue'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 import SendWorkReportLinkModal from '@/components/modals/SendWorkReportLinkModal.vue'
+import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -329,6 +330,27 @@ async function deleteClient() {
     toast.error(e?.response?.data?.error?.message || t('client.delete_failed'))
   }
 }
+
+// ─── Lišta akcí (sdílená ActionBar) — sjednocuje horní toolbar i spodní lištu ───
+const clientActions = computed<ActionItem[]>(() => {
+  const c = client.value
+  if (!c) return []
+  const w = auth.canWrite
+  return [
+    { key: 'edit', label: t('common.edit'), icon: 'edit', tier: 'primary', variant: 'primary',
+      show: w, to: `/clients/${c.id}/edit` },
+    { key: 'vat', label: vatInfoLoading.value ? t('common.loading') : t('client.vat_payer_details'), icon: 'badgeCheck',
+      tier: 'secondary', variant: 'primary', show: !!c.dic, disabled: vatInfoLoading.value, run: loadVatPayerDetails },
+    { key: 'wr-link', label: t('workReportTracking.button'), icon: 'link', tier: 'secondary', variant: 'primary',
+      show: w, run: () => { showWrLinkModal.value = true } },
+    { key: 'archive', label: t('common.archive'), icon: 'archive', tier: 'overflow', variant: 'warning',
+      show: w && !c.archived_at, run: archive },
+    { key: 'unarchive', label: t('common.restore'), icon: 'uturn', tier: 'overflow', variant: 'success',
+      show: w && !!c.archived_at, run: unarchive },
+    { key: 'delete', label: t('common.delete'), icon: 'trash', tier: 'overflow', variant: 'danger',
+      show: canDelete.value && w, run: deleteClient },
+  ]
+})
 </script>
 
 <template>
@@ -347,23 +369,7 @@ async function deleteClient() {
           <span v-if="client.archived_at" class="px-2 py-0.5 text-xs bg-neutral-100 text-neutral-600 rounded">{{ t('common.archived') }}</span>
         </div>
       </div>
-      <div class="flex flex-wrap gap-2 md:justify-end">
-        <RouterLink v-if="auth.canWrite" :to="`/clients/${client.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('common.edit') }}
-        </RouterLink>
-        <button v-if="client.dic" @click="loadVatPayerDetails" :disabled="vatInfoLoading"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5 disabled:opacity-50">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-          {{ vatInfoLoading ? t('common.loading') : t('client.vat_payer_details') }}
-        </button>
-        <button v-if="(canDelete) && auth.canWrite" @click="deleteClient"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 rounded-md text-danger-500 hover:bg-danger-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-danger-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
-          {{ t('common.delete') }}
-        </button>
-      </div>
+      <ActionBar :actions="clientActions" />
     </div>
 
     <!-- Detaily plátce DPH (na vyžádání z registru plátců DPH / MFČR) -->
@@ -882,25 +888,6 @@ async function deleteClient() {
       </div>
     </div>
     <LinkedDocumentsPanel v-if="client" class="mt-4 block" entity-type="client" :entity-id="client.id" />
-
-    <!-- Spodní lišta — méně časté akce -->
-    <div v-if="auth.canWrite" class="bg-surface border border-neutral-200 rounded-lg shadow-sm px-4 py-3 flex flex-wrap items-center gap-2">
-      <button @click="showWrLinkModal = true"
-        class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-        <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5M10.172 13.828a4 4 0 010-5.656l3-3a4 4 0 015.656 5.656l-1.5 1.5"/></svg>
-        {{ t('workReportTracking.button') }}
-      </button>
-      <button v-if="!client.archived_at" @click="archive"
-        class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 rounded-md text-warning-600 hover:bg-warning-50 inline-flex items-center gap-1.5">
-        <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 1 1 0-4h14a2 2 0 1 1 0 4M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/></svg>
-        {{ t('common.archive') }}
-      </button>
-      <button v-else @click="unarchive"
-        class="cursor-pointer px-3 h-9 text-sm border border-success-500/50 rounded-md text-success-600 hover:bg-success-50 inline-flex items-center gap-1.5">
-        <svg class="w-4 h-4 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a8 8 0 0 1 8 8v2M3 10l6 6m-6-6l6-6"/></svg>
-        {{ t('common.restore') }}
-      </button>
-    </div>
 
     <SendWorkReportLinkModal v-if="client" :open="showWrLinkModal" scope="client" :entity-id="client.id" @close="showWrLinkModal = false" />
   </div>

@@ -66,6 +66,20 @@ function reportHasDates(items: { work_date: string | null }[]): boolean {
   return items.some(i => !!i.work_date)
 }
 
+const supplier = computed(() => preview.value?.supplier || null)
+const supplierAddress = computed(() => {
+  const s = supplier.value
+  if (!s) return ''
+  const line2 = [s.zip, s.city].filter(Boolean).join(' ')
+  return [s.street, line2, s.country].filter(Boolean).join(', ')
+})
+function webDisplay(url: string): string {
+  return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+}
+function webHref(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`
+}
+
 function applyLocale() {
   const l = lang.value
   locale.value = l
@@ -236,13 +250,45 @@ async function verify() {
         </div>
 
         <!-- Preview -->
-        <div v-else-if="preview" class="space-y-4">
-          <div class="bg-surface border border-neutral-200 rounded-xl p-6 shadow-sm">
-            <h1 class="text-xl font-semibold mb-2">{{ t('workReportTracking.public.title') }}</h1>
-            <div class="text-sm text-neutral-600 space-y-0.5">
-              <div v-if="preview.supplier_name"><span class="text-neutral-500">{{ t('workReportTracking.public.from') }}:</span> <strong class="text-neutral-900 ml-1">{{ preview.supplier_name }}</strong></div>
-              <div v-if="preview.client_company_name"><span class="text-neutral-500">{{ t('workReportTracking.public.for') }}:</span> <strong class="text-neutral-900 ml-1">{{ preview.client_company_name }}</strong></div>
-              <div v-if="preview.project_name"><span class="text-neutral-500">{{ t('workReportTracking.public.project') }}:</span> <span class="ml-1">{{ preview.project_name }}</span></div>
+        <div v-else-if="preview" class="space-y-4 wr-scope" :style="{ '--wr-accent': preview.accent_color || '#3B2D83' }">
+          <div class="wr-hero rounded-xl shadow-sm overflow-hidden">
+            <div class="px-6 pt-5 pb-5">
+              <div class="wr-eyebrow text-xs font-semibold uppercase tracking-wider mb-3">{{ t('workReportTracking.public.title') }}</div>
+              <div class="flex flex-wrap items-start justify-between gap-x-10 gap-y-5">
+
+                <!-- Dodavatel -->
+                <div class="min-w-0">
+                  <div class="wr-eyebrow text-[11px] font-semibold uppercase tracking-wider mb-1">{{ t('workReportTracking.public.from') }}</div>
+                  <div class="wr-hero-name text-lg font-bold leading-tight">{{ supplier?.name || preview.supplier_name }}</div>
+                  <div v-if="supplier?.tagline" class="text-sm text-neutral-500 mt-0.5">{{ supplier.tagline }}</div>
+
+                  <div v-if="supplierAddress" class="text-sm text-neutral-600 mt-3">{{ supplierAddress }}</div>
+
+                  <div v-if="supplier?.ic || supplier?.dic || supplier && !supplier.is_vat_payer"
+                    class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-neutral-700 mt-1.5">
+                    <span v-if="supplier?.ic"><span class="text-neutral-400">{{ t('workReportTracking.public.ic') }}</span> {{ supplier.ic }}</span>
+                    <span v-if="supplier?.dic"><span class="text-neutral-400">{{ t('workReportTracking.public.dic') }}</span> {{ supplier.dic }}</span>
+                    <span v-if="supplier && !supplier.is_vat_payer" class="wr-chip">{{ t('workReportTracking.public.non_vat_payer') }}</span>
+                  </div>
+
+                  <div v-if="supplier?.email || supplier?.phone || supplier?.web"
+                    class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm mt-3">
+                    <a v-if="supplier?.email" :href="`mailto:${supplier.email}`" class="wr-link">{{ supplier.email }}</a>
+                    <a v-if="supplier?.phone" :href="`tel:${supplier.phone.replace(/\s+/g, '')}`" class="wr-link">{{ supplier.phone }}</a>
+                    <a v-if="supplier?.web" :href="webHref(supplier.web)" target="_blank" rel="noopener noreferrer" class="wr-link">{{ webDisplay(supplier.web) }}</a>
+                  </div>
+                </div>
+
+                <!-- Pro / zakázka -->
+                <div class="text-sm sm:text-right shrink-0">
+                  <div class="wr-eyebrow text-[11px] font-semibold uppercase tracking-wider mb-1">{{ t('workReportTracking.public.for') }}</div>
+                  <div class="font-semibold text-neutral-900">{{ preview.client_company_name }}</div>
+                  <div v-if="preview.project_name" class="text-neutral-600 mt-2">
+                    <span class="text-neutral-400">{{ t('workReportTracking.public.project') }}:</span> {{ preview.project_name }}
+                  </div>
+                </div>
+
+              </div>
             </div>
           </div>
 
@@ -250,33 +296,33 @@ async function verify() {
             {{ t('workReportTracking.public.no_open') }}
           </div>
 
-          <div v-for="rep in preview.reports" :key="rep.invoice_id" class="bg-surface border border-neutral-200 rounded-xl shadow-sm overflow-hidden">
-            <header class="px-6 py-3 border-b border-neutral-200 flex items-baseline justify-between gap-3 flex-wrap">
-              <h2 class="text-sm font-semibold text-neutral-800">{{ rep.title }}</h2>
+          <div v-for="rep in preview.reports" :key="rep.invoice_id" class="wr-card bg-surface border border-neutral-200 rounded-xl shadow-sm overflow-hidden">
+            <header class="wr-card-head px-6 py-3 border-b flex items-baseline justify-between gap-3 flex-wrap">
+              <h2 class="wr-card-title text-sm font-semibold">{{ rep.title }}</h2>
               <span class="text-xs text-neutral-500">
                 <span v-if="rep.project_name">{{ rep.project_name }} · </span>{{ fmtDate(rep.date) }}
               </span>
             </header>
             <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead class="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
+              <table class="wr-table w-full text-sm table-fixed">
+                <thead class="wr-thead text-xs uppercase tracking-wide">
                   <tr>
                     <th class="px-4 py-2 text-left font-medium">{{ t('workReportTracking.public.description') }}</th>
                     <th v-if="reportHasDates(rep.items)" class="px-3 py-2 text-left font-medium w-28">{{ t('workReportTracking.public.date') }}</th>
                     <th class="px-3 py-2 text-right font-medium w-20 whitespace-nowrap">{{ t('workReportTracking.public.hours') }}</th>
                     <th class="px-3 py-2 text-right font-medium w-32 whitespace-nowrap">{{ t('workReportTracking.public.rate') }}</th>
-                    <th class="px-3 py-2 text-right font-medium w-32 whitespace-nowrap">{{ t('workReportTracking.public.amount') }}</th>
+                    <th class="px-3 py-2 text-right font-medium w-36 whitespace-nowrap">{{ t('workReportTracking.public.amount') }}</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-neutral-100">
                   <tr v-for="(it, idx) in rep.items" :key="idx">
-                    <td class="px-4 py-2 whitespace-pre-wrap text-neutral-800">{{ it.description }}</td>
+                    <td class="px-4 py-2 whitespace-pre-wrap break-words text-neutral-800">{{ it.description }}</td>
                     <td v-if="reportHasDates(rep.items)" class="px-3 py-2 whitespace-nowrap text-neutral-600">{{ fmtDate(it.work_date) }}</td>
                     <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtHours(it.hours) }}</td>
                     <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtMoney(it.rate, rep.currency) }}</td>
                     <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtMoney(it.total_amount, rep.currency) }}</td>
                   </tr>
-                  <tr class="bg-neutral-50 font-semibold">
+                  <tr class="wr-sum font-semibold">
                     <td class="px-4 py-2 text-right" :colspan="reportHasDates(rep.items) ? 2 : 1">{{ t('workReportTracking.public.report') }}</td>
                     <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtHours(rep.total_hours) }} h</td>
                     <td></td>
@@ -285,16 +331,46 @@ async function verify() {
                 </tbody>
               </table>
             </div>
+
+            <!-- Výkaz materiálu -->
+            <div v-if="rep.material_total > 0 && rep.materials.length" class="overflow-x-auto border-t border-neutral-200">
+              <div class="px-4 pt-3 text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                {{ rep.material_title || t('workReportTracking.public.material') }}
+              </div>
+              <table class="wr-table w-full text-sm table-fixed">
+                <thead class="wr-thead text-xs uppercase tracking-wide">
+                  <tr>
+                    <th class="px-4 py-2 text-left font-medium">{{ t('workReportTracking.public.description') }}</th>
+                    <th class="px-3 py-2 text-right font-medium w-20 whitespace-nowrap">{{ t('workReportTracking.public.quantity') }}</th>
+                    <th class="px-3 py-2 text-left font-medium w-16">{{ t('workReportTracking.public.unit') }}</th>
+                    <th class="px-3 py-2 text-right font-medium w-28 whitespace-nowrap">{{ t('workReportTracking.public.unit_price') }}</th>
+                    <th class="px-3 py-2 text-right font-medium w-28 whitespace-nowrap">{{ t('workReportTracking.public.amount') }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="(m, idx) in rep.materials" :key="`mat-${idx}`">
+                    <td class="px-4 py-2 whitespace-pre-wrap break-words text-neutral-800">{{ m.description }}</td>
+                    <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ Number(m.quantity).toLocaleString('cs', { maximumFractionDigits: 3 }) }}</td>
+                    <td class="px-3 py-2 text-neutral-600">{{ m.unit }}</td>
+                    <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtMoney(m.unit_price, rep.currency) }}</td>
+                    <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtMoney(m.total_amount, rep.currency) }}</td>
+                  </tr>
+                  <tr class="wr-sum font-semibold">
+                    <td class="px-4 py-2 text-right" colspan="4">{{ t('workReportTracking.public.report') }}</td>
+                    <td class="px-3 py-2 text-right font-mono whitespace-nowrap">{{ fmtMoney(rep.material_total, rep.currency) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <!-- Grand total -->
-          <div v-if="preview.reports.length" class="bg-surface border-2 rounded-xl p-5 shadow-sm"
-            :style="{ borderColor: preview.accent_color || '#3B2D83' }">
+          <div v-if="preview.reports.length" class="wr-grand rounded-xl p-5 shadow-sm">
             <div class="flex items-baseline justify-between gap-3 flex-wrap">
-              <span class="text-sm font-semibold uppercase tracking-wide text-neutral-600">{{ t('workReportTracking.public.total_open') }}</span>
+              <span class="wr-grand-label text-sm font-semibold uppercase tracking-wide">{{ t('workReportTracking.public.total_open') }}</span>
               <div class="text-right">
-                <div class="text-lg font-bold font-mono">{{ fmtHours(preview.total_hours) }} h</div>
-                <div v-for="tc in preview.totals_by_currency" :key="tc.currency" class="text-lg font-bold font-mono">
+                <div class="wr-grand-amount text-xl font-bold font-mono">{{ fmtHours(preview.total_hours) }} h</div>
+                <div v-for="tc in preview.totals_by_currency" :key="tc.currency" class="wr-grand-amount text-xl font-bold font-mono">
                   {{ fmtMoney(tc.total_amount, tc.currency) }}
                 </div>
               </div>
@@ -311,3 +387,98 @@ async function verify() {
     </footer>
   </div>
 </template>
+
+<style scoped>
+/* Akcentní motiv náhledu — světlá verze, laděná na barvu dodavatele (--wr-accent).
+   color-mix dělá jemné tóny do bílé; v prohlížečích bez podpory se utility-fallback
+   (bg-neutral-50 apod.) zachová. */
+.wr-scope {
+  --wr-tint-head: color-mix(in srgb, var(--wr-accent) 6%, white);
+  --wr-tint-sum: color-mix(in srgb, var(--wr-accent) 11%, white);
+  --wr-tint-hover: color-mix(in srgb, var(--wr-accent) 5%, white);
+  --wr-line: color-mix(in srgb, var(--wr-accent) 22%, white);
+  --wr-ink: color-mix(in srgb, var(--wr-accent) 72%, #1e293b);
+}
+
+/* Hero hlavička — dodavatel + příjemce */
+.wr-hero {
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--wr-accent) 8%, white),
+      white 62%);
+  border: 1px solid var(--wr-line);
+  border-top: 3px solid var(--wr-accent);
+}
+.wr-eyebrow {
+  color: color-mix(in srgb, var(--wr-accent) 55%, #64748b);
+}
+.wr-hero-name {
+  color: var(--wr-ink);
+}
+.wr-link {
+  color: var(--wr-accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.wr-link:hover {
+  text-decoration: underline;
+}
+.wr-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--wr-accent) 12%, white);
+  color: var(--wr-ink);
+  border: 1px solid var(--wr-line);
+}
+
+/* Karta výkazu: akcentní proužek nahoře + tónované záhlaví */
+.wr-card {
+  border-top: 3px solid var(--wr-accent);
+}
+.wr-card-head {
+  background: var(--wr-tint-head);
+  border-bottom-color: var(--wr-line);
+}
+.wr-card-title {
+  color: var(--wr-ink);
+  letter-spacing: 0.01em;
+}
+
+/* Záhlaví tabulky */
+.wr-thead th {
+  background: var(--wr-tint-head);
+  color: var(--wr-ink);
+  border-bottom: 2px solid var(--wr-line);
+}
+
+/* Řádky: jemný hover přes celý řádek */
+.wr-table tbody tr:not(.wr-sum):hover td {
+  background: var(--wr-tint-hover);
+}
+
+/* Součtový řádek výkazu */
+.wr-sum td {
+  background: var(--wr-tint-sum);
+  color: var(--wr-ink);
+  border-top: 1px solid var(--wr-line);
+}
+
+/* Spodní souhrn — výrazný akcentní box s gradientem */
+.wr-grand {
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--wr-accent) 12%, white),
+      color-mix(in srgb, var(--wr-accent) 4%, white));
+  border: 1px solid var(--wr-line);
+  border-left: 4px solid var(--wr-accent);
+}
+.wr-grand-label {
+  color: var(--wr-ink);
+}
+.wr-grand-amount {
+  color: var(--wr-accent);
+}
+</style>

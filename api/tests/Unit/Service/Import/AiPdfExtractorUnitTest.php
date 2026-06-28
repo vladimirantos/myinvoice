@@ -16,6 +16,7 @@ use MyInvoice\Service\Import\IsdocParser;
 use MyInvoice\Service\Import\IsdocToPurchaseInvoiceMapper;
 use MyInvoice\Service\Import\ImageToPdfConverter;
 use MyInvoice\Service\Import\PdfIsdocExtractor;
+use MyInvoice\Service\Import\PurchaseInvoicePdfArchiver;
 use MyInvoice\Service\Invoice\PurchaseInvoiceCalculator;
 use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 use PHPUnit\Framework\TestCase;
@@ -60,6 +61,7 @@ final class AiPdfExtractorUnitTest extends TestCase
             $this->createMock(CnbExchangeRateClient::class),
             new ImageToPdfConverter(), // bez závislostí — reálná instance stačí
             $this->createMock(\MyInvoice\Repository\TaxConstantsRepository::class),
+            $this->createMock(PurchaseInvoicePdfArchiver::class),
             new NullLogger(),
         );
     }

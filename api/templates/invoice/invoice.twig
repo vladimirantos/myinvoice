@@ -207,12 +207,17 @@
     {% for item in invoice.items %}
     <tr{% if item.item_kind == 'discount' %} class="discount-row"{% endif %}>
       {%- set _wr_d = item.description|trim|lower -%}
-      {%- set _is_wr_item = work_report and item.item_kind != 'discount'
+      {%- set _mat_title = work_report.material_title|default('')|trim|lower -%}
+      {%- set _is_mat_item = work_report and work_report.material_total > 0 and item.item_kind != 'discount'
+            and _mat_title != '' and _wr_d == _mat_title -%}
+      {%- set _is_wr_item = work_report and not _is_mat_item and item.item_kind != 'discount'
             and (_wr_d == (work_report.title|default('')|trim|lower)
                  or 'výkaz' in _wr_d or 'work report' in _wr_d) -%}
       <td>
         {%- if _is_wr_item -%}
           <a href="#work-report" class="wr-link">{{ item.description|nl2br }}</a>
+        {%- elseif _is_mat_item -%}
+          <a href="#work-report-material" class="wr-link">{{ item.description|nl2br }}</a>
         {%- else -%}
           {{ item.description|nl2br }}
         {%- endif -%}
@@ -227,7 +232,7 @@
       <td class="num nowrap">{{ (invoice.prices_include_vat and item.quantity != 0 ? item.total_without_vat / item.quantity : item.unit_price_without_vat)|number_format(2, decimal_sep, thousand_sep) }}</td>
       {% endif %}
       {% if supplier.is_vat_payer %}
-      <td class="center nowrap">{{ item.vat_rate_snapshot|number_format(item.vat_rate_snapshot == item.vat_rate_snapshot|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%</td>
+      <td class="center nowrap vat">{{ item.vat_rate_snapshot|number_format(item.vat_rate_snapshot == item.vat_rate_snapshot|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%</td>
       <td class="num nowrap">{{ item.total_without_vat|number_format(2, decimal_sep, thousand_sep) }}</td>
       <td class="num nowrap">{{ item.total_with_vat|number_format(2, decimal_sep, thousand_sep) }}</td>
       {% else %}
@@ -398,16 +403,19 @@
 
 {# Patička (živn. rejstřík + firma·web·email) je v page-footeru dole na stránce. #}
 
-{# ─── VÝKAZ VÍCEPRACÍ — 2. stránka ─── #}
-{% if work_report %}
-{% set wr_has_dates = (work_report.items|filter(it => it.work_date)|length) > 0 %}
+{# ─── VÝKAZ VÍCEPRACÍ + VÝKAZ MATERIÁLU — 2. stránka ─── #}
+{% set _has_work = work_report and (work_report.items|length) > 0 %}
+{% set _has_material = work_report and work_report.material_total > 0 and (work_report.materials|default([])|length) > 0 %}
+{% if _has_work or _has_material %}
+{% set wr_has_dates = _has_work and (work_report.items|filter(it => it.work_date)|length) > 0 %}
 {# Desetinná místa per sloupec: skryj „,00" jen když jsou VŠECHNY hodnoty ve sloupci celé. #}
-{% set hours_dec = (work_report.items|filter(it => it.hours != it.hours|round(0))|length) > 0 ? 2 : 0 %}
-{% set rate_dec  = (work_report.items|filter(it => it.rate != it.rate|round(0))|length) > 0 ? 2 : 0 %}
-{% set total_dec = (work_report.items|filter(it => it.total_amount != it.total_amount|round(0))|length) > 0 ? 2 : 0 %}
+{% set hours_dec = (_has_work and (work_report.items|filter(it => it.hours != it.hours|round(0))|length) > 0) ? 2 : 0 %}
+{% set rate_dec  = (_has_work and (work_report.items|filter(it => it.rate != it.rate|round(0))|length) > 0) ? 2 : 0 %}
+{% set total_dec = (_has_work and (work_report.items|filter(it => it.total_amount != it.total_amount|round(0))|length) > 0) ? 2 : 0 %}
+{% set _doc_type = (_has_work and _has_material)
+      ? t('Výkaz prací a materiálu', 'Work & material report')
+      : (_has_work ? t('Výkaz víceprací', 'Work report') : t('Výkaz materiálu', 'Material report')) %}
 <div class="page-break"></div>
-{# Cíl interního odkazu z položek faktury (mPDF named destination). #}
-<a name="work-report"></a>
 
 <table class="head">
   <tr>
@@ -425,7 +433,7 @@
     {% endif %}
     <td class="meta">
       <hr class="accent-bar">
-      <div class="doc-title">{{ t('Výkaz víceprací', 'Work report') }}</div>
+      <div class="doc-title">{{ _doc_type }}</div>
       {% if invoice.varsymbol %}<div class="doc-subtitle">{{ invoice.varsymbol }}</div>{% endif %}
     </td>
   </tr>
@@ -439,6 +447,9 @@
   </div>
 </div>
 
+{% if _has_work %}
+{# Cíl interního odkazu z položky práce ve faktuře (mPDF named destination). #}
+<a name="work-report"></a>
 <table class="items">
   <thead>
     <tr>
@@ -467,6 +478,49 @@
     </tr>
   </tbody>
 </table>
+{% endif %}
+
+{% if _has_material %}
+{% set qty_dec    = (work_report.materials|filter(m => m.quantity != m.quantity|round(0))|length) > 0 ? 3 : 0 %}
+{% set mprice_dec = (work_report.materials|filter(m => m.unit_price != m.unit_price|round(0))|length) > 0 ? 2 : 0 %}
+{% set mtotal_dec = (work_report.materials|filter(m => m.total_amount != m.total_amount|round(0))|length) > 0 ? 2 : 0 %}
+{# Cíl interního odkazu z položky materiálu ve faktuře (mPDF named destination). #}
+<a name="work-report-material"></a>
+<div class="wr-title" style="font-size:10pt;margin-top:{% if _has_work %}6mm{% else %}0{% endif %};margin-bottom:2mm;">{{ work_report.material_title|default(t('Materiál', 'Material')) }}</div>
+<table class="items">
+  <thead>
+    <tr>
+      <th style="width:52%">{{ t('Popis', 'Description') }}</th>
+      <th class="num nowrap" style="width:13%">{{ t('Množství', 'Quantity') }}</th>
+      <th class="nowrap" style="width:9%">{{ t('MJ', 'Unit') }}</th>
+      <th class="num nowrap" style="width:13%">{{ t('Cena/MJ', 'Unit price') }}</th>
+      <th class="num nowrap" style="width:13%">{{ t('Celkem', 'Total') }}</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in work_report.materials %}
+    <tr>
+      <td>{{ m.description|nl2br }}</td>
+      <td class="num nowrap">{{ m.quantity|number_format(qty_dec, decimal_sep, thousand_sep) }}</td>
+      <td class="nowrap">{{ m.unit }}</td>
+      <td class="num nowrap">{{ m.unit_price|number_format(mprice_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+      <td class="num nowrap">{{ m.total_amount|number_format(mtotal_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+    </tr>
+    {% endfor %}
+    <tr style="background:#F4F2F8;font-weight:bold;">
+      <td style="text-align:right;" colspan="4">{% if supplier.is_vat_payer %}{{ t('Celkem bez DPH', 'Total excl. VAT') }}{% else %}{{ t('Celkem', 'Total') }}{% endif %}</td>
+      <td class="num nowrap">{{ work_report.material_total|number_format(supplier.is_vat_payer ? 2 : mtotal_dec, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+    </tr>
+    {% if supplier.is_vat_payer %}
+    <tr style="background:#F4F2F8;font-weight:bold;">
+      <td style="text-align:right;" colspan="4">{{ t('Celkem s DPH', 'Total incl. VAT') }}{% if work_report.material_vat_rate is not null %} ({{ work_report.material_vat_rate|number_format(work_report.material_vat_rate == work_report.material_vat_rate|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%){% endif %}</td>
+      <td class="num nowrap">{{ work_report.material_total_with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td>
+    </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endif %}
+
 {# Patička je v page-footeru dole na stránce (platí pro obě stránky). #}
 {% endif %}
 

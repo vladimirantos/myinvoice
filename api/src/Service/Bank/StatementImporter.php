@@ -16,6 +16,9 @@ final class StatementImporter
         private readonly Connection $db,
         private readonly GpcParser $parser,
         private readonly StatementMatcher $matcher,
+        // Cross-source dedup GPC ← e-mailové avízo: převezme párování (i manuální/split)
+        // z už spárované avízo-transakce místo dvojího párování téže platby.
+        private readonly EmailNoticeReconciler $reconciler,
     ) {}
 
     /**
@@ -50,18 +53,23 @@ final class StatementImporter
         //      bug report — EUR výpis s 00978 se zobrazoval jako CZK, protože
         //      bank_statements.currency zůstával NULL).
         //   3) Bez 1 i 2: NULL (UI fallback CZK).
-        $accountCurrency = $this->lookupAccountCurrency($h['account_number']);
+        // Účet z currencies (autoritativní měna + kód banky). GPC header kód banky
+        // nenese (na rozdíl od e-mailových avíz) → doplníme ho z konfigurovaného účtu,
+        // ať jsou data normalizovaná napříč zdroji (jinak GPC výpis bank_code = NULL).
+        $account = $this->lookupAccount($h['account_number']);
+        $accountCurrency = $account['code'] ?? null;
+        $accountBankCode = $account['bank_code'] ?? null;
         $statementCurrency = $accountCurrency
             ?? $this->detectStatementCurrency($parsed['transactions']);
 
         $pdo->prepare(
             'INSERT INTO bank_statements
-                 (file_name, file_hash, file_content, account_number, currency,
+                 (file_name, file_hash, file_content, account_number, bank_code, currency,
                   statement_number, statement_date,
                   prev_balance, curr_balance, credit_total, debit_total, transaction_count, imported_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         )->execute([
-            $fileName, $hash, $content, $h['account_number'], $statementCurrency,
+            $fileName, $hash, $content, $h['account_number'], $accountBankCode, $statementCurrency,
             $h['statement_number'], $h['statement_date'],
             $h['prev_balance'], $h['curr_balance'], $h['credit_total'], $h['debit_total'],
             count($parsed['transactions']), $userId,
@@ -90,6 +98,16 @@ final class StatementImporter
                 $tx['description'], $tx['bank_ref'],
             ]);
             $txId = (int) $pdo->lastInsertId();
+
+            // Cross-source dedup: pokud tato platba už dorazila e-mailovým avízem a je
+            // spárovaná, převezmi párování (i manuální/split) na oficiální GPC transakci
+            // místo dvojího párování (jinak falešný přeplatek). GPC = zdroj pravdy.
+            $takeover = $this->reconciler->takeOverFromEmailNotice($txId);
+            if ($takeover !== null) {
+                $matched++;
+                continue;
+            }
+
             $r = $this->matcher->match($txId);
             if (in_array($r['status'], ['auto_exact', 'auto_partial'], true)) {
                 $matched++;
@@ -137,22 +155,27 @@ final class StatementImporter
      * pracuje bez tenant kontextu, ale account_number je defakto unikátní).
      *
      * AccountNumberNormalizer::equals normalizuje leading zeros / dashes pro
-     * porovnání (např. `0000000112866714` z GPC vs `112866714` z UI inputu).
+     * porovnání (např. `0000000123456789` z GPC vs `123456789` z UI inputu).
      * Porovnává se i domácí část IBANu (#109) — cizoměnové účty bývají
      * evidované jen IBANem a bez toho EUR výpis spadl na CZK fallback.
+     *
+     * @return array{code:string, bank_code:?string}|null
      */
-    private function lookupAccountCurrency(string $accountNumber): ?string
+    private function lookupAccount(string $accountNumber): ?array
     {
         if ($accountNumber === '') return null;
         $stmt = $this->db->pdo()->query(
-            'SELECT account_number, iban, code FROM currencies
+            'SELECT account_number, iban, code, bank_code FROM currencies
               WHERE account_number IS NOT NULL OR iban IS NOT NULL'
         );
         if ($stmt === false) return null;
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
             $iban = isset($row['iban']) && is_string($row['iban']) ? $row['iban'] : null;
             if (AccountNumberNormalizer::matchesAny($accountNumber, $row['account_number'] ?? null, $iban)) {
-                return (string) $row['code'];
+                return [
+                    'code'      => (string) $row['code'],
+                    'bank_code' => isset($row['bank_code']) && (string) $row['bank_code'] !== '' ? (string) $row['bank_code'] : null,
+                ];
             }
         }
         return null;

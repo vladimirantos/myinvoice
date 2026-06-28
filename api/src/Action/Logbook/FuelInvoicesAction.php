@@ -75,6 +75,8 @@ final class FuelInvoicesAction
         $filters = [];
         if (!empty($q['year'])) $filters['year'] = (int) $q['year'];
         if (!empty($q['only_unscanned'])) $filters['only_unscanned'] = true;
+        // Nespárované faktury zobraz všechny, spárované jen posledních 10.
+        $filters['scanned_limit'] = isset($q['scanned_limit']) ? max(0, (int) $q['scanned_limit']) : 10;
         $invoices = $this->scans->listFuelStationInvoices($supplierId, $filters);
         return Json::ok($response, [
             'invoices'  => $invoices,

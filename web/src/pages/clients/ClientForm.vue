@@ -562,8 +562,8 @@ async function submit() {
           </div>
         </div>
 
-        <!-- E-mailové kontakty dle účelu (#86) — jen plný editor, ne embedded modal -->
-        <div v-if="!embedded" class="border border-neutral-200 rounded-md p-3 space-y-3">
+        <!-- E-mailové kontakty dle účelu (#86) — plný editor i embedded modal (faktura/new) -->
+        <div class="border border-neutral-200 rounded-md p-3 space-y-3">
           <div class="flex items-center justify-between gap-2 flex-wrap">
             <div>
               <div class="text-sm font-medium text-neutral-700">{{ t('client.email_contacts.title') }}</div>

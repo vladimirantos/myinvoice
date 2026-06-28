@@ -19,6 +19,7 @@ import { useSupplierStore } from '@/stores/supplier'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
 import WorkReportModal from '@/components/modals/WorkReportModal.vue'
+import ActionBar, { type ActionItem } from '@/components/ui/ActionBar.vue'
 
 const { t, locale } = useI18n()
 const toast = useToast()
@@ -1136,6 +1137,78 @@ async function updateApprovalStatus() {
     busy.value = null
   }
 }
+
+// ─── Lišta akcí (sdílená ActionBar) — primary se mění dle lifecyclu dokladu ───
+// Pravidlo „1 primární akce": je-li doklad po splatnosti, primární = Upomínka a Uhradit klesá
+// na sekundární; jinak je primární Uhradit.
+const invoiceActions = computed<ActionItem[]>(() => {
+  const inv = invoice.value
+  if (!inv) return []
+  const w = auth.canWrite
+  const b = busy.value !== null
+  const approvalPending = requiresApproval.value && approvalStatus.value !== 'approved'
+  const markPaidPrimary = !canSendReminder.value
+  return [
+    // ── primary (1 dle stavu) ──
+    { key: 'issue', label: t('invoice.issue'), icon: 'check', tier: 'primary', variant: 'primary',
+      show: isDraft.value && canIssueDraft.value && w,
+      disabled: b || approvalPending, loading: busy.value === 'issue',
+      title: approvalPending ? (t('invoice.approval.issue_blocked') as string) : undefined,
+      run: issue },
+    { key: 'issue-final', label: t('invoice.issue_final'), icon: 'doc', tier: 'primary', variant: 'primary',
+      show: canIssueFinal.value && w, disabled: b, loading: busy.value === 'issue-final', run: issueFinalFromProforma },
+    { key: 'mark-paid', label: t('invoice.mark_paid'), icon: 'checkCircle',
+      tier: markPaidPrimary ? 'primary' : 'secondary', variant: 'success',
+      show: isIssued.value && canMarkPaid.value && w, disabled: b, run: openMarkPaid },
+    { key: 'reminder', label: t('invoice.send_reminder'), icon: 'bell', tier: 'primary', variant: 'warning',
+      show: canSendReminder.value && w, disabled: b,
+      title: t('invoice.reminder_tooltip', { days: daysOverdue.value }) as string, run: openReminderModal },
+    // ── secondary ──
+    { key: 'edit', label: t('common.edit'), icon: 'edit', tier: 'secondary', variant: 'success',
+      show: isDraft.value && w, to: `/invoices/${inv.id}/edit` },
+    { key: 'send', label: t('invoice.send_to_client'), icon: 'send', tier: 'secondary', variant: 'primary',
+      show: canSendEmail.value && w, disabled: b, run: openSendModal },
+    { key: 'approval', label: t('invoice.approval.send_request'), icon: 'send', tier: 'secondary', variant: 'primary',
+      show: canRequestApproval.value && w, disabled: b, loading: busy.value === 'approval-request', run: requestApproval },
+    { key: 'partial', label: t('invoice.partial_payment'), icon: 'coin', tier: 'secondary', variant: 'warning',
+      show: canPartialPayment.value, disabled: b, run: openPartialPayment },
+    { key: 'wr', label: t('invoice.wr_btn'), icon: 'chart', tier: 'secondary', variant: 'primary',
+      show: isDraft.value && inv.invoice_type !== 'tax_document' && w,
+      title: t('invoice.wr_btn') as string, run: () => { wrModalOpen.value = true } },
+    // ── overflow ──
+    { key: 'clone', label: t('invoice.clone'), icon: 'copy', tier: 'overflow', variant: 'primary',
+      show: !isDraft.value && !['cancellation', 'credit_note'].includes(inv.invoice_type) && w,
+      disabled: b, loading: busy.value === 'clone', run: cloneInvoice },
+    { key: 'pdf', label: t('invoice.download_pdf'), icon: 'doc', tier: 'overflow', variant: 'neutral',
+      show: !isDraft.value || inv.items.length > 0,
+      title: invoiceWillBeSigned.value ? (t('invoice.download_pdf_tooltip_signed') as string) : undefined,
+      run: downloadPdf },
+    { key: 'delete', label: t('common.delete'), icon: 'trash', tier: 'overflow', variant: 'danger',
+      show: isDraft.value && w, disabled: b, run: deleteInvoice },
+    // ── spodní panel „Více akcí" → pod „Pokročilé" (test/odeslání, admin, storno/destrukce) ──
+    { key: 'client', label: t('invoice.client_detail'), icon: 'user', tier: 'advanced', variant: 'neutral',
+      to: `/clients/${inv.client_id}` },
+    { key: 'send-test', label: t('invoice.send_test'), icon: 'send', tier: 'advanced', variant: 'primary',
+      show: canSendTest.value, disabled: b, loading: busy.value === 'send-test', run: sendTest },
+    { key: 'approval-test', label: t('invoice.approval.test_send'), icon: 'send', tier: 'advanced', variant: 'primary',
+      show: requiresApproval.value, disabled: b, loading: busy.value === 'approval-test', run: requestApprovalTest },
+    { key: 'send-test-reminder', label: t('invoice.send_test_reminder'), icon: 'bell', tier: 'advanced', variant: 'warning',
+      show: canSendTestReminder.value, disabled: b, loading: busy.value === 'send-test-reminder', run: sendTestReminder },
+    { key: 'recurring-from', label: t('recurring.create_from_invoice'), icon: 'cycle', tier: 'advanced', variant: 'primary',
+      show: inv.invoice_type === 'invoice' && !inv.recurring_template_id,
+      to: { name: 'recurring-new', query: { from_invoice: inv.id } } },
+    { key: 'edit-admin', label: t('invoice.edit_admin'), icon: 'edit', tier: 'advanced', variant: 'warning',
+      show: canAdminEdit.value, disabled: b, run: editIssued },
+    { key: 'unmark-paid', label: t('invoice.unmark_paid'), icon: 'uturn', tier: 'advanced', variant: 'warning',
+      show: isAdmin.value && inv.status === 'paid', disabled: b, loading: busy.value === 'unmark-paid', run: unmarkPaid },
+    { key: 'cancel', label: isCreditNoteSource.value ? t('invoice.cancel_credit_note') : t('invoice.cancel_or_credit'),
+      icon: 'trash', tier: 'advanced', variant: 'danger',
+      show: canCancel.value, disabled: b, run: openCancelModal },
+    { key: 'delete-cancelled', label: t('invoice.delete_cancelled'), icon: 'trash', tier: 'advanced', variant: 'danger',
+      show: isAdmin.value && (inv.status === 'cancelled' || (inv.invoice_type === 'cancellation' && !!inv.parent_invoice_id)),
+      disabled: b, loading: busy.value === 'delete', run: deleteInvoice },
+  ]
+})
 </script>
 
 <template>
@@ -1172,89 +1245,7 @@ async function updateApprovalStatus() {
               : t('invoice.approval.status_' + approvalStatus) }}
         </span>
       </h1>
-      <div class="flex flex-wrap gap-2 md:justify-end">
-        <!-- Draft akce -->
-        <RouterLink v-if="isDraft && auth.canWrite" :to="`/invoices/${invoice.id}/edit`"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500 text-success-600 hover:bg-success-50 font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-          {{ t('common.edit') }}
-        </RouterLink>
-        <button v-if="canRequestApproval && auth.canWrite" @click="requestApproval" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/></svg>
-          {{ busy === 'approval-request' ? '…' : t('invoice.approval.send_request') }}
-        </button>
-        <button v-if="isDraft && canIssueDraft && auth.canWrite" @click="issue"
-          :disabled="busy !== null || (requiresApproval && approvalStatus !== 'approved')"
-          :title="requiresApproval && approvalStatus !== 'approved' ? t('invoice.approval.issue_blocked') : ''"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-          {{ busy === 'issue' ? '…' : t('invoice.issue') }}
-        </button>
-        <!-- Výkaz: jen u draftu (kde se reálně edituje) a s právem editace. U vystavených/odeslaných
-             dokladů se výkaz needituje (backend SaveWorkReportAction vrátí 409 pro status != draft),
-             proto se tlačítko vůbec nezobrazuje. Méně významné → až za hlavními akcemi. -->
-        <!-- Daňový doklad k přijaté platbě výkaz práce nemá (generuje se z platby). -->
-        <button v-if="isDraft && invoice.invoice_type !== 'tax_document' && auth.canWrite"
-          @click="wrModalOpen = true"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5"
-          :title="t('invoice.wr_btn')">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-6m3 6v-4m3 4v-2M5 21h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2z"/></svg>
-          {{ t('invoice.wr_btn') }}
-        </button>
-        <button v-if="isDraft && auth.canWrite" @click="deleteInvoice" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></svg>
-          {{ t('common.delete') }}
-        </button>
-
-        <!-- Issued+ akce (hlavní) — před utility (Klonovat/PDF) -->
-        <button v-if="canSendEmail && auth.canWrite" @click="openSendModal" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 0 0 2.22 0L21 8M5 19h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z"/></svg>
-          {{ t('invoice.send_to_client') }}
-        </button>
-        <button v-if="canIssueFinal && auth.canWrite" @click="issueFinalFromProforma" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
-          {{ busy === 'issue-final' ? '…' : t('invoice.issue_final') }}
-        </button>
-        <button v-if="isIssued && canMarkPaid && auth.canWrite" @click="openMarkPaid" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-success-500/50 text-success-600 hover:bg-success-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-success-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 14l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-          {{ t('invoice.mark_paid') }}
-        </button>
-        <!-- Částečná úhrada (#89) — evidence platby na libovolnou částku -->
-        <button v-if="canPartialPayment" @click="openPartialPayment" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-amber-500/50 text-amber-700 hover:bg-amber-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-          {{ t('invoice.partial_payment') }}
-        </button>
-        <button v-if="canSendReminder && auth.canWrite" @click="openReminderModal" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm bg-warning-500 hover:bg-warning-600 disabled:bg-neutral-300 text-white font-medium rounded-md inline-flex items-center gap-1.5"
-          :title="t('invoice.reminder_tooltip', { days: daysOverdue })">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
-          {{ t('invoice.send_reminder') }}
-        </button>
-
-        <!-- Utility (méně významné) → za hlavními akcemi -->
-        <button v-if="(!isDraft && !['cancellation','credit_note'].includes(invoice.invoice_type)) && auth.canWrite" @click="cloneInvoice" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2m-6 12h8a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2z"/></svg>
-          {{ busy === 'clone' ? '…' : t('invoice.clone') }}
-        </button>
-        <button v-if="!isDraft || invoice.items.length > 0" @click="downloadPdf"
-          :title="invoiceWillBeSigned ? (t('invoice.download_pdf_tooltip_signed') as string) : undefined"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-500/40 rounded-md text-primary-700 hover:bg-primary-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
-          {{ t('invoice.download_pdf') }}
-          <span v-if="invoiceWillBeSigned" :title="(t('invoice.download_pdf_tooltip_signed') as string)"
-            class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-success-50 px-1.5 py-0.5 text-[10px] font-medium text-success-700">
-            <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-            {{ t('invoice.signed_badge') }}
-          </span>
-        </button>
-      </div>
+      <ActionBar :actions="invoiceActions" />
     </div>
 
     <div class="flex items-start justify-between gap-4">
@@ -2011,6 +2002,59 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
+    <!-- Výkaz materiálu -->
+    <div v-if="workReport && workReport.material_total > 0" class="bg-surface border border-neutral-200 rounded-lg shadow-sm overflow-hidden">
+      <header class="px-5 py-3 border-b border-neutral-200 flex items-baseline justify-between gap-3">
+        <h3 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('invoice.work_report_material') }}</h3>
+        <span class="text-sm text-neutral-700">{{ workReport.material_title }}</span>
+      </header>
+      <!-- Desktop: tabulka -->
+      <div class="hidden md:block overflow-x-auto">
+        <table class="w-full text-sm table-sticky-first">
+          <thead class="bg-neutral-50 text-neutral-500 text-xs uppercase tracking-wide">
+            <tr>
+              <th class="text-left px-5 py-2 font-medium">{{ t('invoice.wr_description') }}</th>
+              <th class="text-right px-4 py-2 font-medium w-24">{{ t('invoice.wr_material_qty') }}</th>
+              <th class="text-left px-4 py-2 font-medium w-20">{{ t('invoice.wr_material_unit') }}</th>
+              <th class="text-right px-4 py-2 font-medium w-32">{{ t('invoice.wr_material_unit_price') }}</th>
+              <th class="text-right px-5 py-2 font-medium w-36">{{ t('invoice.wr_total') }}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-neutral-100">
+            <tr v-for="(m, i) in workReport.materials" :key="i">
+              <td class="px-5 py-2 text-neutral-800 whitespace-pre-wrap">{{ m.description }}</td>
+              <td class="px-4 py-2 text-right font-mono">{{ Number(m.quantity).toLocaleString('cs', { maximumFractionDigits: 3 }) }}</td>
+              <td class="px-4 py-2 text-neutral-600">{{ m.unit }}</td>
+              <td class="px-4 py-2 text-right font-mono">{{ formatMoney(m.unit_price, invoice.currency) }}</td>
+              <td class="px-5 py-2 text-right font-mono">{{ formatMoney(Number(m.total_amount ?? Number(m.quantity) * Number(m.unit_price)), invoice.currency) }}</td>
+            </tr>
+            <tr class="bg-neutral-50 font-semibold">
+              <td class="px-5 py-2 text-right" colspan="4">{{ t('invoice.totals.total') }}</td>
+              <td class="px-5 py-2 text-right font-mono">{{ formatMoney(workReport.material_total, invoice.currency) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Mobile: stack karet -->
+      <div class="md:hidden divide-y divide-neutral-100">
+        <div v-for="(m, i) in workReport.materials" :key="`mm-${i}`" class="p-3 space-y-1">
+          <div class="text-sm whitespace-pre-wrap text-neutral-800">{{ m.description }}</div>
+          <div class="flex items-baseline justify-between text-xs text-neutral-500">
+            <span class="font-mono">{{ Number(m.quantity).toLocaleString('cs', { maximumFractionDigits: 3 }) }} {{ m.unit }}</span>
+            <span>
+              <span class="font-mono">{{ formatMoney(m.unit_price, invoice.currency) }}</span>
+              <span class="text-neutral-400 mx-1.5">·</span>
+              <span class="font-mono font-semibold text-neutral-900">{{ formatMoney(Number(m.total_amount ?? Number(m.quantity) * Number(m.unit_price)), invoice.currency) }}</span>
+            </span>
+          </div>
+        </div>
+        <div class="bg-neutral-50 p-3 flex items-center justify-end font-semibold">
+          <span class="font-mono">{{ formatMoney(workReport.material_total, invoice.currency) }}</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Stav schválení výkazu — viditelné jen pokud projekt vyžaduje + výkaz existuje -->
     <div v-if="requiresApproval" class="bg-surface border border-neutral-200 rounded-lg shadow-sm">
       <header class="px-5 py-3 border-b border-neutral-200">
@@ -2330,73 +2374,6 @@ async function updateApprovalStatus() {
       </div>
     </div>
 
-    <!-- Sekundární akce — pod fakturou (Test odeslání + admin/destrukční).
-         Pro draft zobrazujeme kvůli „Test odeslání" + odkazu na klienta;
-         vnitřní tlačítka mají vlastní v-if podmínky. -->
-    <div v-if="invoice" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
-      <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('invoice.more_actions') }}</h3>
-      <div class="flex flex-wrap gap-2">
-        <RouterLink :to="`/clients/${invoice.client_id}`"
-          class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 text-neutral-700 hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM12 14a7 7 0 0 0-7 7h14a7 7 0 0 0-7-7z"/></svg>
-          {{ t('invoice.client_detail') }}
-        </RouterLink>
-
-        <button v-if="canSendTest" @click="sendTest" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-300 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-          {{ busy === 'send-test' ? '…' : t('invoice.send_test') }}
-        </button>
-
-        <button v-if="requiresApproval" @click="requestApprovalTest" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-300 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-primary-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-          {{ busy === 'approval-test' ? '…' : t('invoice.approval.test_send') }}
-        </button>
-
-        <button v-if="canSendTestReminder" @click="sendTestReminder" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/40 rounded-md text-warning-600 hover:bg-warning-50 disabled:opacity-50 inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-warning-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
-          {{ busy === 'send-test-reminder' ? '…' : t('invoice.send_test_reminder') }}
-        </button>
-
-        <RouterLink v-if="invoice.invoice_type === 'invoice' && !invoice.recurring_template_id"
-          :to="{ name: 'recurring-new', query: { from_invoice: invoice.id } }"
-          class="cursor-pointer px-3 h-9 text-sm border border-primary-300 text-primary-700 hover:bg-primary-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M4 9a8 8 0 0 1 14.13-4.06M20 20v-5h-5M20 15a8 8 0 0 1-14.13 4.06"/></svg>
-          {{ t('recurring.create_from_invoice') }}
-        </RouterLink>
-
-        <button v-if="canAdminEdit" @click="editIssued" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
-          {{ t('invoice.edit_admin') }}
-        </button>
-
-        <button v-if="isAdmin && invoice.status === 'paid'" @click="unmarkPaid" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-warning-500/50 text-warning-600 hover:bg-warning-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M3 6h18M3 14h18M3 18h18"/><path stroke-linecap="round" stroke-linejoin="round" d="M8 4l8 16"/></svg>
-          {{ busy === 'unmark-paid' ? '…' : t('invoice.unmark_paid') }}
-        </button>
-
-        <button v-if="canCancel" @click="openCancelModal" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-danger-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 11v6m4-6v6m1 5H9a2 2 0 0 1-2-2V7h10v13a2 2 0 0 1-2 2zM5 7h14l-1-3H6L5 7z"/></svg>
-          {{ isCreditNoteSource ? t('invoice.cancel_credit_note') : t('invoice.cancel_or_credit') }}
-        </button>
-
-        <button v-if="isAdmin && (
-            invoice.status === 'cancelled'
-            || (invoice.invoice_type === 'cancellation' && invoice.parent_invoice_id)
-          )"
-          @click="deleteInvoice" :disabled="busy !== null"
-          class="cursor-pointer px-3 h-9 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md inline-flex items-center gap-1.5">
-          <svg class="w-4 h-4 text-danger-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 11v6m4-6v6m1 5H9a2 2 0 0 1-2-2V7h10v13a2 2 0 0 1-2 2zM5 7h14l-1-3H6L5 7z"/></svg>
-          {{ busy === 'delete' ? '…' : t('invoice.delete_cancelled') }}
-        </button>
-
-      </div>
-    </div>
 
     <!-- Work report modal (jen pro draft + workflow projekty) -->
     <WorkReportModal v-if="invoice"

@@ -8,11 +8,21 @@ import {
   type TripCategory, type TripImportReport,
 } from '@/api/logbook'
 import { useAuthStore } from '@/stores/auth'
+import FilterBar from '@/components/ui/FilterBar.vue'
 
 const { t, locale } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
 const props = defineProps<{ resetToken?: number; openNewToken?: number }>()
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry"
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (filterCar.value !== '') n++
+  if (yearFilter.value !== '') n++
+  if (monthFilter.value !== '') n++
+  return n
+})
 
 const trips = ref<Trip[]>([])
 const cars = ref<Car[]>([])
@@ -146,7 +156,7 @@ function newTrip() {
   Object.assign(draft, {
     id: 0, car_id: defCar?.id ?? 0, trip_date: new Date().toISOString().slice(0, 10),
     time_start: '', time_end: '', odometer_start: defCar?.last_odometer ?? null, odometer_end: null, distance_km: null,
-    category_id: categories.value[0]?.id ?? null, purpose: '', origin: '', destination: '', note: '',
+    category_id: (categories.value.find(c => c.is_default) ?? categories.value[0])?.id ?? null, purpose: '', origin: '', destination: '', note: '',
   })
   open.value = true
 }
@@ -260,7 +270,7 @@ function fmtKm(n: number): string { return n.toLocaleString('cs-CZ', { maximumFr
 
 <template>
   <section>
-    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-3 mb-4 flex flex-wrap items-center gap-2">
+    <FilterBar :active-count="activeFilterCount">
         <select v-model="filterCar" @change="load" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('logbook.all_cars') }}</option>
           <option v-for="c in cars" :key="c.id" :value="c.id">{{ c.registration }}{{ c.name ? ` — ${c.name}` : '' }}</option>
@@ -273,7 +283,6 @@ function fmtKm(n: number): string { return n.toLocaleString('cs-CZ', { maximumFr
           <option :value="''">{{ t('logbook.all_months') }}</option>
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
-      <div class="flex flex-wrap gap-2 ml-auto">
         <button @click="openExport" :disabled="trips.length === 0"
           class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5 disabled:opacity-50">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
@@ -284,13 +293,14 @@ function fmtKm(n: number): string { return n.toLocaleString('cs-CZ', { maximumFr
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 4v12m0-12l-4 4m4-4l4 4"/></svg>
           {{ t('logbook.import') }}
         </button>
+      <template #actions>
         <button v-if="auth.canWrite" @click="newTrip" :disabled="cars.length === 0"
           class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5 disabled:opacity-50">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m6-6H6"/></svg>
           {{ t('logbook.trip_new') }}
         </button>
-      </div>
-    </div>
+      </template>
+    </FilterBar>
 
     <div v-if="cars.length === 0 && !loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('logbook.no_cars_hint') }}</div>
     <div v-else-if="loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('common.loading') }}</div>

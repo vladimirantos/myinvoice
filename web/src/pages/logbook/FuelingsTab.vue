@@ -8,11 +8,21 @@ import {
   type FuelInvoice, type FuelInvoiceItem,
 } from '@/api/logbook'
 import { useAuthStore } from '@/stores/auth'
+import FilterBar from '@/components/ui/FilterBar.vue'
 
 const { t, locale } = useI18n()
 const toast = useToast()
 const auth = useAuthStore()
 const props = defineProps<{ resetToken?: number; openNewToken?: number }>()
+
+// Počet aktivních filtrů pro odznáček na mobilním tlačítku „Filtry"
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (filterCar.value !== '') n++
+  if (yearFilter.value !== '') n++
+  if (monthFilter.value !== '') n++
+  return n
+})
 
 const fuelings = ref<Fueling[]>([])
 const cars = ref<Car[]>([])
@@ -276,7 +286,7 @@ const sourceBadge: Record<string, string> = {
 
 <template>
   <section>
-    <div class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-3 mb-4 flex flex-wrap items-center gap-2">
+    <FilterBar :active-count="activeFilterCount">
         <select v-model="filterCar" @change="load" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option value="">{{ t('logbook.all_cars') }}</option>
           <option v-for="c in cars" :key="c.id" :value="c.id">{{ c.registration }}{{ c.name ? ` — ${c.name}` : '' }}</option>
@@ -289,7 +299,6 @@ const sourceBadge: Record<string, string> = {
           <option :value="''">{{ t('logbook.all_months') }}</option>
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
-      <div class="flex flex-wrap gap-2 ml-auto">
         <button @click="openExport" :disabled="fuelings.length === 0"
           class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5 disabled:opacity-50">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2M12 16V4m0 12l-4-4m4 4l4-4"/></svg>
@@ -300,12 +309,13 @@ const sourceBadge: Record<string, string> = {
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>
           {{ t('logbook.from_invoices') }}
         </button>
+      <template #actions>
         <button v-if="auth.canWrite" @click="newFueling" class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v12m6-6H6"/></svg>
           {{ t('logbook.fueling_new') }}
         </button>
-      </div>
-    </div>
+      </template>
+    </FilterBar>
 
     <div v-if="loading" class="text-center text-neutral-500 py-12 text-sm">{{ t('common.loading') }}</div>
     <div v-else-if="filteredFuelings.length === 0" class="text-center text-neutral-500 py-12 text-sm">{{ t('logbook.no_fuelings') }}</div>
@@ -530,11 +540,17 @@ const sourceBadge: Record<string, string> = {
       <div class="bg-surface rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-5 space-y-4">
         <div class="flex items-center justify-between gap-2">
           <h2 class="text-lg font-semibold">{{ t('logbook.from_invoices_title') }}</h2>
-          <button @click="backfillHistory" :disabled="backfilling || invoices.length === 0"
-            class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-3M20 15a8 8 0 0 1-14 3"/></svg>
-            {{ backfilling ? t('logbook.backfill_running') : t('logbook.backfill') }}
-          </button>
+          <div class="flex items-center gap-2">
+            <button @click="backfillHistory" :disabled="backfilling || invoices.length === 0"
+              class="cursor-pointer h-9 px-3 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 inline-flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-3M20 15a8 8 0 0 1-14 3"/></svg>
+              {{ backfilling ? t('logbook.backfill_running') : t('logbook.backfill') }}
+            </button>
+            <button @click="invOpen = false" :title="t('common.close')" :aria-label="t('common.close')"
+              class="cursor-pointer h-9 w-9 shrink-0 flex items-center justify-center text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-md">
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
         </div>
         <p class="text-sm text-neutral-500">{{ t('logbook.from_invoices_hint') }}</p>
         <div class="flex items-start gap-2 text-xs text-warning-700 bg-warning-50 border border-warning-500/40 rounded-md px-3 py-2">
@@ -604,13 +620,6 @@ const sourceBadge: Record<string, string> = {
               </div>
             </div>
           </div>
-        </div>
-
-        <div class="flex justify-end">
-          <button @click="invOpen = false" class="cursor-pointer h-9 px-4 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 inline-flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-            {{ t('common.close') }}
-          </button>
         </div>
       </div>
     </div>
