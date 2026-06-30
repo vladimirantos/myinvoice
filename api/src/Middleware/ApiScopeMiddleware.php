@@ -58,6 +58,7 @@ final class ApiScopeMiddleware implements MiddlewareInterface
         '#^/api/recurring(/|$)#',
         '#^/api/bank-statements(/|$)#',
         '#^/api/bank-transactions(/|$)#',
+        '#^/api/logbook(/|$)#',
         '#^/api/documents(/|$)#',
         '#^/api/document-folders(/|$)#',
         '#^/api/suppliers(/|$)#',

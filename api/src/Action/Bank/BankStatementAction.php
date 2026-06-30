@@ -153,21 +153,25 @@ final class BankStatementAction
         } catch (\Throwable $e) {
             return Json::error($response, 'parse_failed', 'Nelze parsovat: ' . $e->getMessage(), 400);
         }
+        // MS-P2-1 + #167: ověř, že account_number patří currencies aktuálního supplieru,
+        // a vyber cílový měnový účet. U víceměnového účtu se SDÍLENÝM číslem (Raiffeisenbank:
+        // CZK/EUR/USD = jedno číslo) nelze měnu z GPC odvodit → vyžádej `account_id`.
+        $currencyId = null;
         $accountNumber = (string) ($parsed['header']['account_number'] ?? '');
         if ($accountNumber !== '') {
             $sid = SupplierGuard::currentId($request);
             $stmt = $this->db->pdo()->prepare(
-                'SELECT account_number FROM currencies WHERE supplier_id = ? AND account_number IS NOT NULL'
+                'SELECT id, code, label, account_number, iban FROM currencies WHERE supplier_id = ?'
             );
             $stmt->execute([$sid]);
-            $found = false;
-            foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $stored) {
-                if (\MyInvoice\Service\Bank\AccountNumberNormalizer::equals((string) $stored, $accountNumber)) {
-                    $found = true;
-                    break;
+            $matches = [];
+            foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+                $iban = isset($row['iban']) && is_string($row['iban']) ? $row['iban'] : null;
+                if (\MyInvoice\Service\Bank\AccountNumberNormalizer::matchesAny($accountNumber, $row['account_number'] ?? null, $iban)) {
+                    $matches[] = $row;
                 }
             }
-            if (!$found) {
+            if ($matches === []) {
                 return Json::error(
                     $response,
                     'wrong_supplier_account',
@@ -175,10 +179,51 @@ final class BankStatementAction
                     409
                 );
             }
+
+            $body = (array) ($request->getParsedBody() ?? []);
+            $rawAccountId = $body['account_id'] ?? null;
+            if ($rawAccountId !== null && $rawAccountId !== '') {
+                // Zvolený účet musí být mezi shodami (tím je vynucený scope na supplieru
+                // i shoda čísla účtu — nelze podstrčit cizí účet/měnu).
+                $accId = (int) $rawAccountId;
+                $chosen = null;
+                foreach ($matches as $m) {
+                    if ((int) $m['id'] === $accId) { $chosen = $m; break; }
+                }
+                if ($chosen === null) {
+                    return Json::error(
+                        $response,
+                        'invalid_account',
+                        'Zvolený měnový účet neodpovídá číslu účtu ve výpisu nebo nepatří aktuálnímu dodavateli.',
+                        422
+                    );
+                }
+                $currencyId = $accId;
+            } else {
+                // Bez volby: víc měnových variant téhož čísla = nejednoznačné → vrať kandidáty.
+                $distinctCodes = array_values(array_unique(array_map(static fn ($m) => (string) $m['code'], $matches)));
+                if (count($distinctCodes) > 1) {
+                    $candidates = array_map(static fn ($m) => [
+                        'account_id' => (int) $m['id'],
+                        'code'       => (string) $m['code'],
+                        'label'      => (string) ($m['label'] ?? '') !== '' ? (string) $m['label'] : (string) $m['code'],
+                    ], $matches);
+                    return Json::error(
+                        $response,
+                        'ambiguous_account_currency',
+                        'Toto číslo účtu má více měnových variant — zvolte cílový měnový účet.',
+                        409,
+                        ['candidates' => array_values($candidates)]
+                    );
+                }
+                // Jednoznačný účet: použij konkrétní supplier-scoped řádek (autoritativní
+                // měna i kód banky, tenant-safe — na rozdíl od tenant-less lookupu v importeru).
+                $currencyId = (int) $matches[0]['id'];
+            }
         }
 
         try {
-            $r = $this->importer->import($content, $name, (int) ($user['id'] ?? 0));
+            $r = $this->importer->import($content, $name, (int) ($user['id'] ?? 0), $currencyId);
         } catch (\Throwable $e) {
             return Json::error($response, 'parse_failed', 'Nelze parsovat: ' . $e->getMessage(), 400);
         }

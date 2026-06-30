@@ -515,6 +515,10 @@
       "duplicate": "The same PDF is already archived under another invoice.",
       "upload_error": "Upload failed: {error}"
     },
+    "source": {
+      "download": "Source document (ISDOC)",
+      "badge_title": "Machine-readable source document — click to download"
+    },
     "extraction": {
       "isdoc_found": "ISDOC detected in PDF. Fields prefilled from attachment.",
       "ai_pending": "This PDF has no ISDOC. Fill manually, or use AI extraction in External integrations → AI.",
@@ -821,7 +825,7 @@
     "draft_open_mode_at_issue": "At issue time (standard)",
     "draft_open_mode_period_start": "At start of period (for ongoing work report)",
     "draft_open_mode_period_start_badge": "Open draft",
-    "draft_open_mode_hint": "„At start of period\" opens the draft on the 1st day of the billed month, so you can add extra work to the work report throughout the month. On the issue day the draft is automatically closed, issued and sent (issue date and tax date = end of period).",
+    "draft_open_mode_hint": "„At start of period\" opens the draft on the 1st day of the billed month, so you can add extra work to the work report throughout the month. The draft is automatically closed, issued and sent the day after the period ends (so work logged on the last day is captured too) — the issue date and tax date still stay at the end of period.",
     "draft_open_mode_monthly_only": "„At start of period\" is only available for monthly frequency.",
     "period_start_requires_monthly": "„At start of period\" mode can only be used with monthly frequency.",
     "period_start_requires_auto_issue": "„At start of period\" mode requires auto-issue (the draft closes itself at the end of the period).",
@@ -1927,6 +1931,9 @@
     "delete_failed": "Delete failed.",
     "upload_batch_done": "Batch upload: {ok} imported, {dup} duplicates.",
     "upload_batch_error": "Batch upload: {ok} imported, {dup} duplicates, {err} errors.",
+    "choose_account_title": "Choose currency account",
+    "choose_account_hint": "The file “{file}” belongs to an account number you keep in multiple currencies. The GPC statement carries no currency — pick the target currency account.",
+    "choose_account_confirm": "Import",
     "scan_done": "Scan complete: found {scanned}, imported {imported}, duplicates {duplicate}, errors {errors}",
     "scan_failed": "Scan failed",
     "ignore_confirm": "Mark this transaction as Ignored?",

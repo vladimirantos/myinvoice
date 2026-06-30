@@ -22,9 +22,17 @@ final class StatementImporter
     ) {}
 
     /**
+     * @param ?int $currencyId Cílový měnový účet (currencies.id). Když je zadán, jeho
+     *   měna + kód banky jsou AUTORITATIVNÍ a přebijí lookup podle čísla účtu. Nutné
+     *   u víceměnových účtů se sdíleným číslem (Raiffeisenbank: CZK/EUR/USD = jedno
+     *   číslo), kde GPC hlavička měnu nenese a z čísla účtu ji nelze odvodit (#167).
+     *   Volající (BankStatementAction) ověřuje příslušnost k supplierovi i shodu
+     *   čísla účtu; tady už jen načteme code/bank_code. NULL = dnešní chování
+     *   (lookup podle account_number — folder scan, jednoznačný účet).
+     *
      * @return array{statement_id:int, transactions:int, matched:int, duplicate:bool}
      */
-    public function import(string $content, string $fileName, ?int $userId): array
+    public function import(string $content, string $fileName, ?int $userId, ?int $currencyId = null): array
     {
         $hash = hash('sha256', $content);
         $pdo = $this->db->pdo();
@@ -56,7 +64,10 @@ final class StatementImporter
         // Účet z currencies (autoritativní měna + kód banky). GPC header kód banky
         // nenese (na rozdíl od e-mailových avíz) → doplníme ho z konfigurovaného účtu,
         // ať jsou data normalizovaná napříč zdroji (jinak GPC výpis bank_code = NULL).
-        $account = $this->lookupAccount($h['account_number']);
+        // Explicitně zvolený měnový účet (#167) je autoritativní; jinak lookup podle čísla.
+        $account = $currencyId !== null
+            ? $this->loadCurrencyById($currencyId)
+            : $this->lookupAccount($h['account_number']);
         $accountCurrency = $account['code'] ?? null;
         $accountBankCode = $account['bank_code'] ?? null;
         $statementCurrency = $accountCurrency
@@ -179,5 +190,25 @@ final class StatementImporter
             }
         }
         return null;
+    }
+
+    /**
+     * Měna + kód banky podle konkrétního currencies.id — pro víceměnové účty se
+     * sdíleným číslem (#167), kde lookup podle account_number nestačí (vrátil by
+     * první z N měnových variant). Příslušnost k supplierovi a shodu čísla účtu
+     * ověřuje caller (BankStatementAction); tady už jen načteme řádek.
+     *
+     * @return array{code:string, bank_code:?string}|null
+     */
+    private function loadCurrencyById(int $currencyId): ?array
+    {
+        $stmt = $this->db->pdo()->prepare('SELECT code, bank_code FROM currencies WHERE id = ?');
+        $stmt->execute([$currencyId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row === false) return null;
+        return [
+            'code'      => (string) $row['code'],
+            'bank_code' => isset($row['bank_code']) && (string) $row['bank_code'] !== '' ? (string) $row['bank_code'] : null,
+        ];
     }
 }

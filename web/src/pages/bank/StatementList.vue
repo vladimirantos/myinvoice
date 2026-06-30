@@ -2,7 +2,8 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { bankApi, type BankStatement, type BankAccountOption, type ImportResult } from '@/api/bank'
+import { bankApi, type BankStatement, type BankAccountOption, type ImportResult, type AmbiguousAccount } from '@/api/bank'
+import type { AxiosError } from 'axios'
 import { formatMoney, formatDate } from '@/composables/useFormat'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
@@ -60,6 +61,42 @@ const scanning = ref(false)
 const scanConfigured = ref(false)
 const lastResult = ref<ImportResult | null>(null)
 const error = ref('')
+
+// #167: výpis u víceměnového účtu se sdíleným číslem účtu — server vrátí 409
+// `ambiguous_account_currency` se seznamem měnových variant; necháme uživatele zvolit
+// cílový účet a soubor nahrajeme znovu s account_id. Modal řešíme přes Promise, aby
+// se sekvenční smyčka uploadu pozastavila do volby uživatele.
+const ambiguityModal = ref<{ fileName: string; candidates: AmbiguousAccount[] } | null>(null)
+const ambiguitySelected = ref<number | null>(null)
+let ambiguityResolver: ((accountId: number | null) => void) | null = null
+
+function ambiguousCandidates(e: unknown): AmbiguousAccount[] | null {
+  const err = e as AxiosError<{ error?: { code?: string; candidates?: AmbiguousAccount[] } }>
+  const data = err?.response?.data?.error
+  if (data?.code === 'ambiguous_account_currency' && Array.isArray(data.candidates)) {
+    return data.candidates
+  }
+  return null
+}
+
+function askForAccount(fileName: string, candidates: AmbiguousAccount[]): Promise<number | null> {
+  ambiguitySelected.value = candidates[0]?.account_id ?? null
+  ambiguityModal.value = { fileName, candidates }
+  return new Promise(resolve => { ambiguityResolver = resolve })
+}
+
+function confirmAmbiguity() {
+  const id = ambiguitySelected.value
+  ambiguityModal.value = null
+  ambiguityResolver?.(id)
+  ambiguityResolver = null
+}
+
+function cancelAmbiguity() {
+  ambiguityModal.value = null
+  ambiguityResolver?.(null)
+  ambiguityResolver = null
+}
 
 async function onScan() {
   scanning.value = true
@@ -205,19 +242,31 @@ async function onFileSelected(e: Event) {
   const errors: string[] = []
   let lastNonDuplicate: ImportResult | null = null
 
+  const results: ImportResult[] = []
   for (const file of files) {
     try {
-      const r = await bankApi.upload(file)
-      if (r.duplicate) {
-        duplicateCount++
-      } else {
-        okCount++
-        lastNonDuplicate = r
-      }
+      results.push(await bankApi.upload(file))
     } catch (e) {
-      errorCount++
-      errors.push(`${file.name}: ${apiErrorMessage(e)}`)
+      // #167: sdílené číslo účtu napříč měnami → nech uživatele zvolit cílový účet a zkus znovu.
+      const candidates = ambiguousCandidates(e)
+      if (candidates) {
+        const accountId = await askForAccount(file.name, candidates)
+        if (accountId === null) continue  // uživatel zrušil → soubor přeskočíme (ne chyba)
+        try {
+          results.push(await bankApi.upload(file, accountId))
+        } catch (e2) {
+          errorCount++
+          errors.push(`${file.name}: ${apiErrorMessage(e2)}`)
+        }
+      } else {
+        errorCount++
+        errors.push(`${file.name}: ${apiErrorMessage(e)}`)
+      }
     }
+  }
+  for (const r of results) {
+    if (r.duplicate) duplicateCount++
+    else { okCount++; lastNonDuplicate = r }
   }
 
   await load()
@@ -444,5 +493,32 @@ async function onFileSelected(e: Event) {
           class="cursor-pointer h-8 px-3 border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-40 disabled:cursor-not-allowed">›</button>
       </div>
     </nav>
+
+    <!-- #167: volba cílového měnového účtu u sdíleného čísla účtu. Bez click-outside. -->
+    <div v-if="ambiguityModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div class="bg-surface border border-neutral-200 rounded-lg shadow-xl w-full max-w-md p-5">
+        <div class="flex items-start gap-3 mb-3">
+          <svg class="w-5 h-5 text-primary-600 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
+          <div>
+            <h2 class="text-base font-semibold text-neutral-900">{{ t('bank.choose_account_title') }}</h2>
+            <p class="text-sm text-neutral-500 mt-1">{{ t('bank.choose_account_hint', { file: ambiguityModal.fileName }) }}</p>
+          </div>
+        </div>
+        <select v-model="ambiguitySelected"
+          class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm mb-4">
+          <option v-for="c in ambiguityModal.candidates" :key="c.account_id" :value="c.account_id">{{ c.label }}</option>
+        </select>
+        <div class="flex justify-end gap-2">
+          <button type="button" @click="cancelAmbiguity"
+            class="cursor-pointer h-9 px-3 border border-neutral-300 text-neutral-700 hover:bg-neutral-50 text-sm font-medium rounded-md">
+            {{ t('common.cancel') }}
+          </button>
+          <button type="button" @click="confirmAmbiguity" :disabled="ambiguitySelected === null"
+            class="cursor-pointer h-9 px-3 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 text-white text-sm font-medium rounded-md">
+            {{ t('bank.choose_account_confirm') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.42.0** (merge 2026-06-28; předtím v4.33.0, v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.43.3** (merge 2026-06-30; předtím v4.42.0, v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -151,4 +151,15 @@ znovu → označil by i aktuálně nezaplacené faktury jako paid (poškození d
 `git rm` po doběhnutí — záznam v `migrations` na produkci zůstane, fresh DB ji pak přeskočí.)
 
 ---
-_Naposledy aktualizováno: 2026-06-28 (merge upstream v4.42.0)._
+## I. Merge v4.43.3 (2026-06-30) — bez konfliktů
+
+Čistý auto-merge (12 commitů: recurring uzávěrky, GPC měnové účty, import iDoklad PDF / ISDOC
+zaokrouhlení, archivace strojového zdroje přijaté faktury). **Žádný konflikt** — upstream se
+nedotkl našich design/razítko souborů (jediný dotek `Routes.php` = auto-merge). Náš design faktury
+beze změny.
+
+Nová migrace `0123_purchase_invoice_source_artifact.sql` — **bez kolize** s naší fork migrací
+(ta zůstává `0113_mark_all_invoices_paid.sql`; dobře, že nebyla minule přečíslována na 0123).
+
+---
+_Naposledy aktualizováno: 2026-06-30 (merge upstream v4.43.3)._

@@ -121,6 +121,13 @@ export interface ImportResult {
   duplicate: boolean
 }
 
+/** Kandidát měnového účtu při nejednoznačném sdíleném čísle účtu (#167). */
+export interface AmbiguousAccount {
+  account_id: number
+  code: string
+  label: string
+}
+
 /** Účet pro filtr v přehledu výpisů (distinct account_number + jeho label z currencies). */
 export interface BankAccountOption {
   account_number: string
@@ -157,9 +164,15 @@ export const bankApi = {
       ...(params.account ? { 'filter[account]': params.account } : {}),
     } }).then(r => r.data),
   get: (id: number) => api.get<BankStatementDetail>(`/bank-statements/${id}`).then(r => r.data),
-  upload: (file: File) => {
+  /**
+   * Nahraje GPC/ABO výpis. `accountId` (currencies.id) je volitelný — povinný jen
+   * u víceměnového účtu se sdíleným číslem účtu, kdy server vrátí 409
+   * `ambiguous_account_currency` se seznamem kandidátů (#167).
+   */
+  upload: (file: File, accountId?: number) => {
     const fd = new FormData()
     fd.append('file', file)
+    if (accountId !== undefined) fd.append('account_id', String(accountId))
     return api.post<ImportResult>('/bank-statements/upload', fd, {
       headers: { 'Content-Type': 'multipart/form-data' },
     }).then(r => r.data)

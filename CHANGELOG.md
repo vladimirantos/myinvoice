@@ -5,7 +5,44 @@ All notable changes to MyInvoice.cz are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.42.0] — 2026-06-26
+## [Unreleased]
+
+## [4.43.3] — 2026-06-30
+
+### Added
+
+- **Uchování strojového zdroje přijaté faktury (ISDOC/ISDOCX) — důkazní stopa.** Při importu přijaté faktury ze strukturovaného zdroje (`.isdoc`, `.isdocx`, nebo ISDOC vložený v PDF/A-3) se nově **trvale archivuje originální strojově čitelný doklad** vedle vizuálního PDF. Originál (často digitálně podepsaný) má pro audit a kontrolu z FÚ při 10leté archivační lhůtě vyšší hodnotu než PDF render a umožňuje zpětnou rekonstrukci dat. V detailu přijaté faktury přibyla akce **„Zdrojový doklad (ISDOC)"** ke stažení (jen je-li zdroj uložený). Bajty se ukládají as-is — `.isdocx` se NErozbaluje (zachová podpis ZIP obálky), embedded ISDOC v PDF se uloží jako vytažené XML. Zápis je write-once (originál se nikdy nepřepíše). Pokrývá dávkový import i nahrání přes dropzone/AI. Formát-agnostické (`source_format`), takže příští zdroje (Pohoda XML / iDoklad / Fakturoid) půjdou doplnit bez další migrace. (migrace 0123)
+
+### Fixed
+
+- **Vygenerované PDF přijaté faktury („Náš PDF") nově zobrazuje zaokrouhlení.** Rekonstrukční PDF dokladu u faktur se zaokrouhlením ukazovalo v souhrnu jen „Celkem k úhradě" = základ + DPH, takže chybělo haléřové zaokrouhlení a částka k úhradě byla o haléře vedle skutečnosti. Nově se u dokladů se zaokrouhlením vypíše samostatný řádek **Zaokrouhlení** a „Celkem k úhradě" = celkem s DPH + zaokrouhlení (u dokladů bez zaokrouhlení beze změny).
+- **Import ISDOC u dokladů se zaokrouhlením — „k úhradě" nově sedí na doklad.** Přijatá faktura z ISDOC se zaokrouhlením „k úhradě" (typicky e-faktury z e-shopů) se dosud naimportovala s částkou k úhradě = přesný součet položek, takže `K úhradě` bylo o haléře vedle skutečné částky na dokladu (a nepárovalo se přesně s platbou v bance). Import nově čte z ISDOC `<LegalMonetaryTotal>/<PayableAmount>` a haléřový rozdíl uloží jako zaokrouhlení — stejně jako už dělá rozpoznávání z PDF přes AI. Příklad: doklad se základem+DPH 999,99 a zaokrouhlením +0,01 se nově naimportuje tak, že `K úhradě` = 1 000,00. Základ a DPH zůstávají nezměněné (správně pro přiznání DPH a kontrolní hlášení). Sémantika `amount_to_pay` se nemění — zaokrouhlení se i nadále vede mimo něj (pole *Zaokrouhlení*) a do „k úhradě" se promítá stejnou cestou jako u AI importu (QR, platební příkaz, PDF, UI).
+
+## [4.43.2] — 2026-06-29
+
+### Fixed
+
+- **OpenAPI — opravené cesty pravidelných fakturací (`/api/v1/recurring`).** Endpointy pravidelných fakturací byly v `openapi.yaml` zdokumentované dvakrát: jednou správně pod veřejnou cestou `/api/v1/recurring*` a jednou jako starší zbytek pod `/api/recurring*` (bez `/v1/` prefixu). Druhá varianta byla pro konzumenty veřejného API nepoužitelná (token na cestu bez `/v1/` odmítne ApiScopeMiddleware) a zároveň rozbíjela strojové parsování specifikace (`duplicated mapping key`). Stará kopie byla odstraněna, zůstává jediná korektní definice pod `/api/v1/`. Bez dopadu na běh aplikace (jen dokumentace API).
+
+### Changed
+
+- **Manuál — instalace nativní: stažení hotového balíčku místo buildu + sekce Aktualizace.** Kapitola *Instalace — Nativní* nově upozorňuje, že místo buildu ze zdrojáků (Composer + Node/pnpm) stačí stáhnout hotový **production bundle** z GitHub Releases (obsahuje `api/vendor/`, `web/dist/` i vyrenderovaný manuál) — přibyla sekce *4.6 Alternativa: hotový balíček (bez buildu)*. Doplněna i sekce *4.7 Aktualizace* (build ze zdrojáků vs. bundle) s odkazy na kapitolu Aktualizace.
+
+## [4.43.1] — 2026-06-28
+
+### Changed
+
+- **Pravidelné fakturace — nový koncept dalšího období se otevře hned po uzávěrce předchozího.** Navazuje na 4.43.0: u režimu *Na začátku období* cron po uzavření a vystavení předchozího období (den po jeho konci, se zpětným datem k poslednímu dni) **rovnou otevře koncept dalšího období**, pokud už začalo. V praxi tak 1. den měsíce proběhne v jednom běhu „uzavři minulé období (k poslednímu dni) → otevři nové" a uživatel má koncept k zápisu víceprací k dispozici **hned od 1. dne období** (dřív až následující den). Idempotentní, jen pro *Na začátku období*, bez DB migrace.
+
+## [4.43.0] — 2026-06-28
+
+### Added
+
+- **Pravidelné fakturace — měnový účet u GPC importu se sdíleným číslem účtu (#167).** Když máš jeden bankovní účet vedený ve více měnách (stejné číslo účtu pro CZK/EUR/USD), GPC/ABO výpis sám o sobě měnu nenese. Při importu proto nově zvolíš měnu účtu (a konkrétní účet), takže se výpis spáruje se správným měnovým účtem; při nejednoznačnosti import vrátí výzvu k upřesnění místo tichého zařazení.
+
+### Changed
+
+- **Pravidelné fakturace — režim „Na začátku období" uzavírá koncept až den po konci období.** U šablon s otevřeným konceptem (*Na začátku období*) cron dosud uzavíral a vystavoval koncept přímo v den `next_run_date` (typicky poslední den měsíce). Pokud běžel ráno, nestihla se do faktury započítat práce zapsaná do výkazu **týž poslední den**. Nově se uzávěrka posune o **1 den** za konec období (koncept zůstává otevřený celý poslední den a vystaví se až následující den) — **datum vystavení i DUZP přitom zůstávají na konci období** (`next_run_date`), faktura tedy nese stejné datum jako dřív, jen fyzicky vznikne o den později. Týká se jen režimu *Na začátku období*; standardní *Až při vystavení* se nemění. Bez DB migrace.
 
 ### Added
 
