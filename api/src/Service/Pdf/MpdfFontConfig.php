@@ -69,6 +69,23 @@ final class MpdfFontConfig
             'I'  => 'JetBrainsMono-Regular.ttf',
             'BI' => 'JetBrainsMono-Bold.ttf',
         ];
+        // Brandové fonty varianty `spotted` (SIL OFL). Aditivní — default `invoice`
+        // i ostatní PDF jedou dál na Montserrat/JetBrains (cílí je explicitně v CSS).
+        // Statické řezy instancované z variable fontů (mPDF variable fonty neumí).
+        // Hanken Grotesk = grotesk sans (nadpisy/labely/názvy); kurzíva I/BI → R/B.
+        $fontData['hankengrotesk'] = [
+            'R'  => 'HankenGrotesk-Regular.ttf',
+            'B'  => 'HankenGrotesk-Bold.ttf',
+            'I'  => 'HankenGrotesk-Regular.ttf',
+            'BI' => 'HankenGrotesk-Bold.ttf',
+        ];
+        // Source Serif 4 = patkový font (adresy, popisy položek, próza). opsz=11 (text).
+        $fontData['sourceserif'] = [
+            'R'  => 'SourceSerif-Regular.ttf',
+            'B'  => 'SourceSerif-Bold.ttf',
+            'I'  => 'SourceSerif-Regular.ttf',
+            'BI' => 'SourceSerif-Bold.ttf',
+        ];
 
         return [
             // PDF/A-3b (ISO 19005-3) — archivní formát pro VŠECHNY PDF výstupy.
@@ -90,8 +107,8 @@ final class MpdfFontConfig
             // ty jsme smazali, takže bez tohohle by `font-family: …, sans-serif`
             // shodilo render (Cannot find TTF …). Přemapujeme na Montserrat / JetBrains
             // / DejaVu Sans (jediný fallback pro symboly).
-            'sans_fonts'       => ['montserrat', 'dejavusans'],
-            'serif_fonts'      => ['dejavusans'],
+            'sans_fonts'       => ['montserrat', 'hankengrotesk', 'dejavusans'],
+            'serif_fonts'      => ['sourceserif', 'dejavusans'],
             'mono_fonts'       => ['jetbrainsmono', 'dejavusans'],
         ];
     }

@@ -208,20 +208,7 @@
 {# ─── SUMACE: vlevo QR/UHRAZENO/razítko · vpravo součty + černý box ─── #}
 <table class="sp-summary">
   <tr>
-    <td class="sp-sum-left">
-      {% if is_paid %}
-        <div class="sp-paid">
-          <div class="sp-paid-title">{{ t('UHRAZENO', 'PAID') }}</div>
-          {% if invoice.paid_at %}<div class="sp-paid-meta">{{ t('Datum úhrady', 'Paid on') }}: {{ invoice.paid_at|date(date_format) }}</div>{% endif %}
-        </div>
-      {% elseif qr_data_uri %}
-        <div class="sp-qr">
-          <img src="{{ qr_data_uri }}" alt="QR" width="100" height="100">
-          <div class="sp-qr-label">{{ t('QR platba', 'QR payment') }}</div>
-        </div>
-      {% endif %}
-      {% if signature_path %}<div class="sp-stamp"><img src="{{ signature_path }}" alt="{{ t('Razítko', 'Stamp') }}"></div>{% endif %}
-    </td>
+    <td class="sp-sum-left">&nbsp;</td>
     <td class="sp-sum-right">
       <table class="sp-totals">
         {% if supplier.is_vat_payer and invoice.invoice_type != 'proforma' %}
@@ -263,17 +250,35 @@
 </table>
 {% endif %}
 
-{# ─── PODĚKOVÁNÍ / poznámky ─── #}
-<div class="sp-thanks">
-  <div class="sp-thanks-title">{{ t('Děkujeme za spolupráci.', 'Thank you for your business.') }}</div>
-  {% if invoice.note_below_items %}
-  <div class="sp-note">{{ invoice.note_below_items|nl2br }}</div>
-  {% elseif invoice.invoice_type == 'proforma' %}
-  <div>{{ t('Nejedná se o daňový doklad, ten bude vystaven po připsání platby.', 'This is not a tax document. The tax document will be issued after payment is received.') }}</div>
-  {% else %}
-  <div>{{ t('Uhraďte prosím fakturovanou částku do data splatnosti na uvedený účet s variabilním symbolem.', 'Please pay the invoiced amount by the due date to the account above, using the reference number.') }}</div>
-  {% endif %}
-</div>
+{# ─── ZÁVĚR: poděkování + výzva vlevo · QR / UHRAZENO / razítko vpravo ─── #}
+<table class="sp-close">
+  <tr>
+    <td class="sp-close-text">
+      <div class="sp-thanks-title">{{ t('Děkujeme za spolupráci.', 'Thank you for your business.') }}</div>
+      {% if invoice.note_below_items %}
+      <div class="sp-note">{{ invoice.note_below_items|nl2br }}</div>
+      {% elseif invoice.invoice_type == 'proforma' %}
+      <div class="sp-close-body">{{ t('Nejedná se o daňový doklad, ten bude vystaven po připsání platby.', 'This is not a tax document. The tax document will be issued after payment is received.') }}</div>
+      {% else %}
+      <div class="sp-close-body">{{ t('Uhraďte prosím fakturovanou částku do data splatnosti na uvedený účet s variabilním symbolem.', 'Please pay the invoiced amount by the due date to the account above, using the reference number.') }}</div>
+      {% endif %}
+    </td>
+    <td class="sp-close-aside">
+      {% if is_paid %}
+        <div class="sp-paid">
+          <div class="sp-paid-title">{{ t('UHRAZENO', 'PAID') }}</div>
+          {% if invoice.paid_at %}<div class="sp-paid-meta">{{ t('Datum úhrady', 'Paid on') }}: {{ invoice.paid_at|date(date_format) }}</div>{% endif %}
+        </div>
+      {% elseif qr_data_uri %}
+        <div class="sp-qr">
+          <img src="{{ qr_data_uri }}" alt="QR" width="100" height="100">
+          <div class="sp-qr-label">{{ t('QR platba', 'QR payment') }}</div>
+        </div>
+      {% endif %}
+      {% if signature_path %}<div class="sp-stamp"><img src="{{ signature_path }}" alt="{{ t('Razítko', 'Stamp') }}"></div>{% endif %}
+    </td>
+  </tr>
+</table>
 
 {# ─── VÝKAZ VÍCEPRACÍ — 2. stránka ─── #}
 {% if work_report %}
