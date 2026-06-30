@@ -69,10 +69,12 @@ final class InvoicePdfRenderer
         // Cache je validní jen když je novější než šablona, CSS a kód renderu
         // (dle zvolené varianty — viz resolvedTemplate()).
         $tpl = $this->resolvedTemplate();
+        $variantLogo = $this->variantDefaultLogoPath();
         $tplMtime = max(
             @filemtime($tpl['cssPath']) ?: 0,
             @filemtime($tpl['twigPath']) ?: 0,
             @filemtime(__FILE__) ?: 0,
+            $variantLogo !== null ? (@filemtime($variantLogo) ?: 0) : 0,
         );
         $isFresh = static fn (string $p): bool =>
             is_file($p) && (@filemtime($p) ?: 0) >= $tplMtime;
@@ -262,7 +264,10 @@ final class InvoicePdfRenderer
             return $locale === 'en' ? $en : $cs;
         }));
 
-        $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
+        // Vlastní upload má přednost; když chybí (nebo je branding vypnutý), použij
+        // výchozí logo brandové varianty (spotted). Default 'invoice' nemá → zůstává null.
+        $logoPath = $this->resolveLogoPath($supplierData, (int) ($invoice['supplier_id'] ?? 0))
+            ?? $this->variantDefaultLogoPath();
         $signaturePath = $this->resolveSignaturePath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
         return $twig->render($this->resolvedTemplate()['twigName'], [
@@ -332,6 +337,22 @@ final class InvoicePdfRenderer
     {
         return (new InvoiceTemplateResolver(Bootstrap::rootDir()))
             ->resolve((string) $this->config->get('pdf.invoice_template', 'invoice'));
+    }
+
+    /**
+     * Výchozí logo brandové varianty, když dodavatel žádné vlastní nenahrál (nebo má
+     * vypnutý branding). Brandové šablony (spotted) jsou zamčené na svou identitu, takže
+     * logo patří k šabloně, ne k uživatelskému uploadu. Hledá `styles/{variant}-logo.png`;
+     * default varianta `invoice` žádné nemá → null (invariant: stávající instance beze změny).
+     *
+     * Asset MUSÍ být předem flattnutý (bílý podklad, bez alfy) — mPDF neumí SMask
+     * u truecolor RGBA PNG (issue #152), takže žádný runtime flatten neděláme.
+     */
+    private function variantDefaultLogoPath(): ?string
+    {
+        $variant = $this->resolvedTemplate()['variant'];
+        $path = Bootstrap::rootDir() . '/styles/' . $variant . '-logo.png';
+        return is_file($path) ? $path : null;
     }
 
     /**
