@@ -72,12 +72,14 @@ final class MpdfFontConfig
         // Brandové fonty varianty `spotted` (SIL OFL). Aditivní — default `invoice`
         // i ostatní PDF jedou dál na Montserrat/JetBrains (cílí je explicitně v CSS).
         // Statické řezy instancované z variable fontů (mPDF variable fonty neumí).
-        // Hanken Grotesk = grotesk sans (nadpisy/labely/názvy); kurzíva I/BI → R/B.
+        // Hanken Grotesk = grotesk sans (nadpisy/labely/názvy). „Tučný" = SemiBold (600)
+        // dle předlohy (referenční PDF používá SemiBold, ne Bold 700 — 700 je moc těžké).
+        // Kurzíva I/BI → R/B.
         $fontData['hankengrotesk'] = [
             'R'  => 'HankenGrotesk-Regular.ttf',
-            'B'  => 'HankenGrotesk-Bold.ttf',
+            'B'  => 'HankenGrotesk-SemiBold.ttf',
             'I'  => 'HankenGrotesk-Regular.ttf',
-            'BI' => 'HankenGrotesk-Bold.ttf',
+            'BI' => 'HankenGrotesk-SemiBold.ttf',
         ];
         // Source Serif 4 = patkový font (adresy, popisy položek, próza). opsz=11 (text).
         $fontData['sourceserif'] = [

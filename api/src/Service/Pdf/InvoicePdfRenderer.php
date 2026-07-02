@@ -285,6 +285,9 @@ final class InvoicePdfRenderer
             'locale'            => $locale,
             'doc_type_label'    => $this->docTypeLabel($invoice, $locale, $supplierData),
             'doc_title'         => $this->docTitle($invoice),
+            // Číslo dokladu pro zobrazení (varsymbol, u draftu placeholder). Šablony ho
+            // tisknou vždy (i draft), oddělené od názvu typu dokladu.
+            'doc_number'        => $invoice['varsymbol'] ?? ('DRAFT-' . $invoice['id']),
             'parent_varsymbol'  => $this->parentVarsymbol($invoice),
             'work_report'       => $this->workReports->findByInvoice((int) $invoice['id']),
             'date_format'       => $locale === 'en' ? 'M j, Y' : 'j. n. Y',

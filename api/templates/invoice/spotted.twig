@@ -29,11 +29,14 @@
 {%- elseif payment_method == 'other' -%}{% set payment_label = t('Jiný způsob', 'Other') %}
 {%- endif -%}
 
-{%- set doc_subtitle = t('Daňový doklad', 'Tax document') -%}
-{%- if invoice.invoice_type == 'invoice' and not supplier.is_vat_payer -%}{% set doc_subtitle = t('Faktura', 'Invoice') %}
-{%- elseif invoice.invoice_type == 'proforma' -%}{% set doc_subtitle = t('Zálohová faktura', 'Proforma') %}
-{%- elseif invoice.invoice_type == 'credit_note' -%}{% set doc_subtitle = supplier.is_vat_payer ? t('Opravný daňový doklad', 'Tax credit note') : t('Opravná faktura', 'Credit note') %}
-{%- elseif invoice.invoice_type == 'cancellation' -%}{% set doc_subtitle = t('Storno (interní)', 'Cancellation (internal)') %}
+{# Hlavička dle předlohy: malý řádek = daňová kategorie (jen plátce DPH), velký =
+   NÁZEV typu dokladu (bez čísla), oranžový = číslo dokladu (doc_number, i pro draft). #}
+{%- set doc_category = supplier.is_vat_payer ? t('Daňový doklad', 'Tax document') : '' -%}
+{%- set doc_type_name = t('Faktura', 'Invoice') -%}
+{%- if invoice.invoice_type == 'proforma' -%}{% set doc_type_name = t('Zálohová faktura', 'Proforma') %}{% set doc_category = '' %}
+{%- elseif invoice.invoice_type == 'credit_note' -%}{% set doc_type_name = supplier.is_vat_payer ? t('Opravný daňový doklad', 'Tax credit note') : t('Opravná faktura', 'Credit note') %}{% set doc_category = '' %}
+{%- elseif invoice.invoice_type == 'cancellation' -%}{% set doc_type_name = t('Storno (interní)', 'Cancellation (internal)') %}{% set doc_category = '' %}
+{%- elseif invoice.invoice_type == 'tax_document' -%}{% set doc_type_name = t('Daňový doklad k platbě', 'Tax document for payment') %}{% set doc_category = '' %}
 {%- endif -%}
 
 {%- set bank_acct = '' -%}
@@ -54,9 +57,9 @@
       {% endif %}
     </td>
     <td class="sp-head-meta">
-      <div class="sp-doctype">{{ doc_subtitle|upper }}</div>
-      <div class="sp-doctitle">{{ doc_title }}</div>
-      {% if invoice.varsymbol %}<div class="sp-docno">{{ t('č.', 'No.') }} {{ invoice.varsymbol }}</div>{% endif %}
+      {% if doc_category %}<div class="sp-doctype">{{ doc_category|upper }}</div>{% endif %}
+      <div class="sp-doctitle">{{ doc_type_name }}</div>
+      <div class="sp-docno">{{ t('č.', 'No.') }} {{ doc_number }}</div>
       {% if parent_varsymbol %}<div class="sp-docref">{{ t('k faktuře', 'to invoice') }} {{ parent_varsymbol }}</div>{% endif %}
     </td>
   </tr>
@@ -103,7 +106,7 @@
 <table class="sp-refbox"><tr>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Reference', 'Reference no.') }}</div>
-    <div class="sp-ref-accent">{{ invoice.varsymbol|default('—') }}</div>
+    <div class="sp-ref-accent">{{ invoice.varsymbol|default(doc_number) }}</div>
   </td>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Číslo účtu', 'Account number') }}</div>
