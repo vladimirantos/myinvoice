@@ -166,7 +166,15 @@ td.sp-sum-right { width: 50%; }
 .sp-czk-grand td { font-weight: bold; color: #141414; border-top: 0.8pt solid #141414; padding-top: 1.5mm; }
 
 /* ─── ZÁVĚR: poděkování vlevo · QR / UHRAZENO vpravo ─── */
-.sp-close { width: 100%; border-collapse: collapse; margin-top: 9mm; }
+/* Ukotveno k dolnímu okraji obsahové plochy (těsně nad 26mm patičkou). mPDF
+   position:fixed měří `bottom` od spodku obsahové plochy (margin_bottom), ne od
+   papíru → bottom:0 posadí závěr úplně dolů, nad footer. */
+.sp-close-fixed {
+    position: fixed;
+    left: 15mm; right: 15mm; bottom: 0;
+    width: 180mm;
+}
+.sp-close { width: 100%; border-collapse: collapse; margin-top: 0; }
 .sp-close td { vertical-align: top; }
 td.sp-close-text { width: 62%; padding-right: 10mm; }
 td.sp-close-aside { width: 38%; text-align: right; }

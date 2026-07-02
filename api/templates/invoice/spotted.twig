@@ -85,7 +85,6 @@
           {%- else %} · {{ t('DIČ', 'VAT ID') }} {{ supplier.dic }}{% endif -%}
         {% endif %}
       </div>
-      {% if supplier.commercial_register %}<div class="sp-v2">&nbsp;</div><div class="sp-reg">{{ supplier.commercial_register }}</div>{% endif %}
     </td>
     <td class="sp-party">
       <div class="sp-label">{{ t('Odběratel', 'Customer') }}</div>
@@ -111,7 +110,7 @@
 {# ─── BÉŽOVÝ REFERENČNÍ BOX: VS · účet · vystaveno · splatnost ─── #}
 <table class="sp-refbox"><tr>
   <td class="sp-ref-cell">
-    <div class="sp-ref-label">{{ t('Reference', 'Reference no.') }}</div>
+    <div class="sp-ref-label">{{ t('Variabilní symbol', 'Variable symbol') }}</div>
     <div class="sp-v3">&nbsp;</div>
     <div class="sp-ref-accent">{{ invoice.varsymbol|default(doc_number) }}</div>
   </td>
@@ -155,13 +154,13 @@
     <tr>
       {% if supplier.is_vat_payer %}
       <th style="width:42%">{{ t('Položka', 'Item') }}</th>
-      <th class="num nowrap" style="width:8%">{{ t('Mn.', 'Qty') }}</th>
+      <th class="num nowrap" style="width:8%">{{ t('Počet', 'Qty') }}</th>
       <th class="num nowrap" style="width:16%">{{ t('Cena/j', 'Unit price') }}</th>
       <th class="center nowrap" style="width:10%">{{ t('DPH', 'VAT') }}</th>
       <th class="num nowrap" style="width:24%">{{ t('Celkem', 'Total') }}</th>
       {% else %}
       <th style="width:52%">{{ t('Položka', 'Item') }}</th>
-      <th class="num nowrap" style="width:8%">{{ t('Mn.', 'Qty') }}</th>
+      <th class="num nowrap" style="width:8%">{{ t('Počet', 'Qty') }}</th>
       <th class="num nowrap" style="width:18%">{{ t('Cena/j', 'Unit price') }}</th>
       {% if invoice.reverse_charge %}
       <th class="num nowrap" style="width:22%">{{ t('Celkem bez DPH', 'Total excl. VAT') }}</th>
@@ -263,7 +262,10 @@
 </table>
 {% endif %}
 
-{# ─── ZÁVĚR: poděkování + výzva vlevo · QR / UHRAZENO / razítko vpravo ─── #}
+{# ─── ZÁVĚR: poděkování + výzva vlevo · QR / UHRAZENO / razítko vpravo ───
+   Ukotveno k dolnímu okraji stránky (position:fixed nad patičkou) — poděkování
+   dole vlevo, QR platba dole vpravo. #}
+<div class="sp-close-fixed">
 <table class="sp-close">
   <tr>
     <td class="sp-close-text">
@@ -292,6 +294,7 @@
     </td>
   </tr>
 </table>
+</div>
 
 {# ─── VÝKAZ VÍCEPRACÍ — 2. stránka ─── #}
 {% if work_report %}
