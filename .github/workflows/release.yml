@@ -112,8 +112,10 @@ jobs:
       # Stack 2 (spotted, 542) — deploy přes SSH (panel-managed stack, bez webhooku).
       # SSH na VM, `docker compose pull && up` v /srv/stack (image je veřejný na ghcr,
       # migrace běží přes docker-entrypoint.sh při startu kontejneru). Bez secretu se přeskočí.
+      # always() → spotted je nezávislý stack; nesmí ho blokovat selhání stack 1
+      # (flaky Rosti pull endpoint / proxy timeout). Image je stejný na GHCR pro oba.
       - name: Deploy stack 2 (spotted) — SSH
-        if: ${{ env.SPOTTED_SSH_KEY != '' }}
+        if: ${{ always() && env.SPOTTED_SSH_KEY != '' }}
         shell: bash
         run: |
           set -euo pipefail
