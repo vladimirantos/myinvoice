@@ -23,6 +23,14 @@ body {
 /* Patkový font pro prózu/adresy/popisy (Source Serif) */
 .serif { font-family: 'sourceserif', serif; }
 
+/* Vertikální mezery. mPDF IGNORUJE margin i padding na blokových prvcích uvnitř
+   <td> (ověřeno: 30mm margin/padding = beze změny), ale line-height honoruje.
+   Mezery mezi bloky proto děláme spacer elementem <div class="sp-vN">&nbsp;</div>. */
+.sp-v1 { font-size: 1.5mm; line-height: 1.5mm; }
+.sp-v2 { font-size: 2.5mm; line-height: 2.5mm; }
+.sp-v3 { font-size: 3.5mm; line-height: 3.5mm; }
+.sp-v4 { font-size: 5mm; line-height: 5mm; }
+
 /* ─── HLAVIČKA ─── */
 .sp-head { width: 100%; border-collapse: collapse; margin-bottom: 4mm; }
 .sp-head td { vertical-align: top; }
@@ -59,12 +67,12 @@ hr.sp-rule {
 .sp-parties td.sp-party { width: 50%; vertical-align: top; padding-right: 10mm; }
 .sp-label {
     font-size: 8pt; text-transform: uppercase; letter-spacing: 1.4pt;
-    color: #9A938C; font-weight: bold; margin-bottom: 4.5mm;
+    color: #9A938C; font-weight: bold; margin-bottom: 6.5mm;
 }
-.sp-party-name { font-size: 13.5pt; font-weight: bold; color: #141414; line-height: 1.25; margin-bottom: 4mm; }
-.sp-addr { font-family: 'sourceserif', serif; font-size: 10.5pt; color: #141414; line-height: 1.6; }
-.sp-ids { font-family: 'jetbrainsmono', monospace; font-size: 8.5pt; color: #6B6B6B; margin-top: 5mm; line-height: 1.6; }
-.sp-reg { font-family: 'sourceserif', serif; font-size: 9pt; color: #9A938C; line-height: 1.45; margin-top: 3.5mm; }
+.sp-party-name { font-size: 13.5pt; font-weight: bold; color: #141414; line-height: 1.25; margin-bottom: 6mm; }
+.sp-addr { font-family: 'sourceserif', serif; font-size: 10.5pt; color: #141414; line-height: 1.7; }
+.sp-ids { font-family: 'jetbrainsmono', monospace; font-size: 8.5pt; color: #6B6B6B; margin-top: 7mm; line-height: 1.6; }
+.sp-reg { font-family: 'sourceserif', serif; font-size: 9pt; color: #9A938C; line-height: 1.45; margin-top: 5mm; }
 
 /* ─── BÉŽOVÝ REFERENČNÍ BOX ─── */
 .sp-refbox {
@@ -75,7 +83,7 @@ hr.sp-rule {
 .sp-refbox td.sp-ref-cell:first-child { padding-left: 6mm; }
 .sp-ref-label {
     font-size: 7.5pt; text-transform: uppercase; letter-spacing: 1pt;
-    color: #9A938C; font-weight: bold; margin-bottom: 3.5mm;
+    color: #9A938C; font-weight: bold; margin-bottom: 5mm;
 }
 .sp-ref-accent { font-family: 'jetbrainsmono', monospace; font-size: 11pt; font-weight: bold; color: #D9512C; }
 .sp-ref-mono { font-family: 'jetbrainsmono', monospace; font-size: 10pt; color: #141414; }

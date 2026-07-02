@@ -71,10 +71,13 @@
   <tr>
     <td class="sp-party">
       <div class="sp-label">{{ t('Dodavatel', 'Supplier') }}</div>
+      <div class="sp-v3">&nbsp;</div>
       <div class="sp-party-name">{{ supplier.company_name }}</div>
+      <div class="sp-v3">&nbsp;</div>
       {% if supplier.display_name and supplier.display_name != supplier.company_name %}<div class="sp-addr">{{ supplier.display_name }}</div>{% endif %}
       <div class="sp-addr">{{ supplier.street }}, {{ supplier.zip }} {{ supplier.city }}</div>
       <div class="sp-addr">{{ locale == 'en' ? supplier.country_name_en : supplier.country_name_cs }}</div>
+      <div class="sp-v4">&nbsp;</div>
       <div class="sp-ids">
         {% if supplier.ic %}{{ t('IČO', 'Reg. No.') }} {{ supplier.ic }}{% endif %}
         {%- if supplier.dic %}
@@ -82,14 +85,17 @@
           {%- else %} · {{ t('DIČ', 'VAT ID') }} {{ supplier.dic }}{% endif -%}
         {% endif %}
       </div>
-      {% if supplier.commercial_register %}<div class="sp-reg">{{ supplier.commercial_register }}</div>{% endif %}
+      {% if supplier.commercial_register %}<div class="sp-v2">&nbsp;</div><div class="sp-reg">{{ supplier.commercial_register }}</div>{% endif %}
     </td>
     <td class="sp-party">
       <div class="sp-label">{{ t('Odběratel', 'Customer') }}</div>
+      <div class="sp-v3">&nbsp;</div>
       <div class="sp-party-name">{{ client.company_name }}</div>
+      <div class="sp-v3">&nbsp;</div>
       {% if client.first_name or client.last_name %}<div class="sp-addr">{{ client.first_name }} {{ client.last_name }}</div>{% endif %}
       <div class="sp-addr">{{ client.street }}, {{ client.zip }} {{ client.city }}</div>
       <div class="sp-addr">{{ locale == 'en' ? client.country_name_en : client.country_name_cs }}</div>
+      <div class="sp-v4">&nbsp;</div>
       <div class="sp-ids">
         {%- set tax_no_labels = {'SK': 'DIČ', 'DE': 'Steuernummer', 'AT': 'Steuernummer', 'PL': 'NIP', 'HU': 'Adószám'} -%}
         {%- set client_dic_sk = client.dic and (client.dic|upper starts with 'SK') -%}
@@ -106,18 +112,22 @@
 <table class="sp-refbox"><tr>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Reference', 'Reference no.') }}</div>
+    <div class="sp-v3">&nbsp;</div>
     <div class="sp-ref-accent">{{ invoice.varsymbol|default(doc_number) }}</div>
   </td>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Číslo účtu', 'Account number') }}</div>
+    <div class="sp-v3">&nbsp;</div>
     <div class="sp-ref-mono">{{ bank_acct|default('—') }}</div>
   </td>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Datum vystavení', 'Issue date') }}</div>
+    <div class="sp-v3">&nbsp;</div>
     <div class="sp-ref-mono">{{ invoice.issue_date|date(date_format) }}</div>
   </td>
   <td class="sp-ref-cell">
     <div class="sp-ref-label">{{ t('Datum splatnosti', 'Due date') }}</div>
+    <div class="sp-v3">&nbsp;</div>
     <div class="sp-ref-mono">{{ invoice.due_date|date(date_format) }}</div>
   </td>
 </tr></table>
