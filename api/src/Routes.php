@@ -657,6 +657,12 @@ final class Routes
         $app->get   ('/api/documents/{id:[0-9]+}/preview',    [DocumentFileAction::class, 'preview']);
         $app->get   ('/api/documents/{id:[0-9]+}/thumb',      [DocumentFileAction::class, 'thumb']);
 
+        // Poznámky (fork feature) — společné pro instanci, viz docs/FORK-CHANGES.md
+        $app->get   ('/api/notes',              [\MyInvoice\Action\Note\NotesAction::class, 'list']);
+        $app->post  ('/api/notes',              [\MyInvoice\Action\Note\NotesAction::class, 'create']);
+        $app->put   ('/api/notes/{id:[0-9]+}',  [\MyInvoice\Action\Note\NotesAction::class, 'update']);
+        $app->delete('/api/notes/{id:[0-9]+}',  [\MyInvoice\Action\Note\NotesAction::class, 'delete']);
+
         // Kniha jízd (logbook) — auta, jízdy, tankování, kategorie cest
         $app->get   ('/api/logbook/cars',                 [\MyInvoice\Action\Logbook\CarsAction::class, 'list']);
         $app->post  ('/api/logbook/cars',                 [\MyInvoice\Action\Logbook\CarsAction::class, 'create']);

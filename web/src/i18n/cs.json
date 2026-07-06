@@ -132,6 +132,25 @@
     "group_invoices": "Vydané faktury",
     "group_purchase": "Přijaté faktury"
   },
+  "notes": {
+    "title": "Poznámky",
+    "subtitle": "Volné poznámky s podporou Markdownu.",
+    "new": "Nová poznámka",
+    "edit": "Upravit poznámku",
+    "empty": "Zatím žádné poznámky.",
+    "no_match": "Nic neodpovídá hledání.",
+    "search_placeholder": "Hledat v poznámkách…",
+    "field_title": "Titulek",
+    "field_body": "Text",
+    "title_placeholder": "Např. Nápady na příští kvartál",
+    "body_placeholder": "Text poznámky… podporuje Markdown",
+    "title_required": "Titulek je povinný.",
+    "confirm_delete": "Smazat poznámku „{title}\u201c?",
+    "preview": "Náhled",
+    "back_to_edit": "Zpět na editaci",
+    "markdown_hint": "Podporuje Markdown: nadpisy (#), odrážky (-), **tučně**, *kurzíva*, `kód`, odkazy.",
+    "created_at": "Vytvořeno"
+  },
   "logbook": {
     "title": "Kniha jízd",
     "subtitle": "Evidence jízd, automobilů a tankování",
@@ -293,7 +312,7 @@
     "settings": "Nastavení", "supplier_current": "Dodavatel", "suppliers": "Dodavatelé", "codebooks": "Číselníky", "users": "Uživatelé", "emails": "E-maily",
     "log": "Log", "cron_jobs": "Plánované úlohy", "exports": "Export vystavených", "imports": "Importy", "imports_issued": "Import vystavených", "imports_purchase": "Import přijatých", "ai_import": "AI import", "integrations": "Externí integrace", "crm": "CRM", "reports_dph": "DPH přiznání", "reports_kh": "Kontrolní hlášení", "reports_dph_book": "Kniha DPH", "reports_shv": "Souhrnné hlášení", "reports_income_tax": "Daň z příjmů", "reports_submissions": "Archiv podání", "reports_monthly_export": "Hromadný export", "tax_optimizer": "Daňový optimalizátor", "email_templates": "E-mail šablony", "email_profiles": "Odesílací profily", "sent_emails": "Odeslané e-maily", "smtp_logs": "SMTP log analýza", "approvals": "Schvalování", "updates": "Aktualizace", "api_tokens": "API tokeny", "electronic_signatures": "Elektronické podpisy", "signing_profiles": "Podpisové profily", "bank_accounts": "Bankovní účty", "bank_email_notices": "Bankovní avíza", "recurring": "Pravidelné fakturace", "help": "Nápověda", "logout": "Odhlásit",
     "section_sales": "Prodej", "section_purchase": "Nákup", "section_finance": "Finance", "section_clients": "Klienti",
-    "section_documents": "Dokumenty", "documents": "Dokumenty", "logbook": "Kniha jízd",
+    "section_documents": "Dokumenty", "documents": "Dokumenty", "notes": "Poznámky", "logbook": "Kniha jízd",
     "purchase_invoices": "Přijaté faktury", "purchase_export": "Export přijatých", "payment_orders": "Platební příkazy", "vendors": "Dodavatelé",
     "support_dev": "Podpořte rozvoj",
     "quick_new": "Vytvořit", "quick_invoice": "Vydaná faktura", "quick_proforma": "Zálohová faktura", "quick_recurring": "Pravidelná fakturace", "quick_client": "Klient", "quick_vendor": "Dodavatel", "quick_purchase": "Přijatá faktura", "quick_trip": "Kniha jízd", "quick_fueling": "Tankování"

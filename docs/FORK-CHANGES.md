@@ -180,4 +180,24 @@ SMTP `info@youarespotted.com` záměrně ponechán — je to login ke schránce.
 přes rosticli, dřívější poznámka „nedosáhne" platila jen pro CI webhook.)
 
 ---
-_Naposledy aktualizováno: 2026-07-06 (merge upstream v4.44.1 + doména spotted-ai.com)._
+## K. Poznámky (fork feature, 2026-07-06)
+
+Volný poznámkový blok v menu Dokumenty (titulek + Markdown, CRUD). Společné pro celou
+instanci (bez vazby na supplier/user — vědomé rozhodnutí, jednouživatelská instance).
+Spec: `docs/superpowers/specs/2026-07-06-poznamky-design.md`.
+
+| Soubor | Co |
+|---|---|
+| `db/migrations/0126_notes.sql` | Tabulka `notes` (idempotentní; ⚠️ hlídat kolizi čísla s budoucím upstream 0126 — přečíslovat nad jejich max, re-run je bezpečný) |
+| `api/src/Repository/NoteRepository.php`, `api/src/Action/Note/NotesAction.php` | CRUD + validace + activity log |
+| `api/src/Routes.php` | `GET/POST/PUT/DELETE /api/notes` (blok „Poznámky (fork feature)") |
+| `api/tests/Unit/Action/NotesActionValidationTest.php` | Validace bez DB |
+| `web/src/utils/markdown.ts` | Mini-markdown renderer **vytažen z `admin/Update.vue`** (ta ho teď importuje) — pozor při merge konfliktů Update.vue |
+| `web/src/pages/notes/Notes.vue`, `web/src/api/notes.ts` | Stránka (seznam + modal s náhledem) + API klient |
+| `web/src/router/index.ts`, `AppLayout.vue`, `i18n/{cs,en}.json` | Route `/notes`, menu položka + ikona, překlady (`nav.notes`, blok `notes`) |
+
+**Merge akce:** pokud upstream přidá vlastní poznámky, adoptovat jeho a naše zahodit
+(hlavní pravidlo). Extrakce `markdown.ts` je jinak neutrální refaktor — držet naši verzi.
+
+---
+_Naposledy aktualizováno: 2026-07-06 (merge upstream v4.44.1 + doména spotted-ai.com + poznámky)._

@@ -31,6 +31,8 @@ const routes: RouteRecordRaw[] = [
       // Dokumenty (sekce Dokumenty — plán source/11)
       { path: 'documents',              name: 'documents',        component: () => import('@/pages/documents/DocumentsBrowser.vue') },
       { path: 'documents/:id(\\d+)',    name: 'document-detail',  component: () => import('@/pages/documents/DocumentDetail.vue') },
+      // Poznámky (fork feature) — volný Markdown blokátor v sekci Dokumenty
+      { path: 'notes',                  name: 'notes',            component: () => import('@/pages/notes/Notes.vue') },
       // Kniha jízd (logbook) — auta, jízdy, tankování
       { path: 'logbook',                name: 'logbook',          component: () => import('@/pages/logbook/LogbookPage.vue') },
       { path: 'stats',                  name: 'stats',           component: () => import('@/pages/Stats.vue') },
