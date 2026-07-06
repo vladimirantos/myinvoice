@@ -1912,6 +1912,178 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SupplierFull' }
+    put:
+      tags: [Settings]
+      summary: Úprava aktuálního dodavatele
+      description: |
+        Částečný update supplier-a v jehož scope token operuje — pošli jen pole,
+        která chceš změnit. Vyžaduje token se scope `read_write` patřící adminovi.
+
+        Zahrnuje i **číslování dokladů** (`invoice_number_format`,
+        `proforma_number_format`, `credit_note_number_format`,
+        `purchase_invoice_number_format`, `invoice_number_period`) a **branding
+        PDF/e-mailů** (`email_branding_enabled`, `email_accent_color`,
+        `pdf_logo_show_name`, `display_name`, `tagline`). Logo se nahrává zvlášť
+        (není součástí tohoto endpointu).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupplierUpdate' }
+      responses:
+        '200':
+          description: Aktualizovaný supplier
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplierFull' }
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/settings/supplier/invoice-counter:
+    put:
+      tags: [Settings]
+      summary: Nastavení counteru číselné řady dokladů
+      description: |
+        Nastaví supplier-wide counter tak, aby **příští vystavený doklad** daného
+        typu dostal číslo `next_number`. `date` určuje, do kterého období (dle
+        `invoice_number_period` supplier-a) se counter zapíše — default dnes.
+
+        Na rozdíl od samoopravné synchronizace umí counter i **snížit**; pokud by
+        nové číslo kolidovalo s už vystaveným dokladem, vystavení se automaticky
+        posune na první volné číslo (číslo se nikdy nezduplikuje).
+
+        Typický use-case: převzetí existující číselné řady při migraci z jiného
+        fakturačního software nebo napojení externího systému.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [next_number]
+              properties:
+                type:
+                  type: string
+                  enum: [invoice, proforma, credit_note]
+                  default: invoice
+                next_number:
+                  type: integer
+                  minimum: 1
+                  maximum: 999999999
+                  example: 42
+                  description: Číslo, které dostane příští vystavený doklad.
+                date:
+                  type: string
+                  format: date
+                  description: Datum určující období řady (YYYY-MM-DD). Default = dnes.
+      responses:
+        '200':
+          description: Counter nastaven
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type: { type: string, example: invoice }
+                  next_number: { type: integer, example: 42 }
+                  counter:
+                    type: integer
+                    example: 41
+                    description: Uložená hodnota `last_number` (= next_number - 1).
+                  period:
+                    type: string
+                    example: "202607"
+                    description: Klíč období counteru (YYYY / YYYYMM / ALL).
+                  preview:
+                    type: string
+                    example: "2607042"
+                    description: Jak bude vypadat příští vygenerované číslo.
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/settings/supplier/logo:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    post:
+      tags: [Settings]
+      summary: Nahrání loga dodavatele
+      description: |
+        Multipart upload loga (pole `file`). Formáty PNG / JPG / SVG / WebP,
+        max **1 MiB**. Rastr se zmenší na max 240×800 px; SVG se sanitizuje
+        a rasterizuje (vektorová kopie se zachová pro ostré PDF). Logo se
+        v e-mailech a PDF fakturách zobrazuje jen při
+        `email_branding_enabled = true` (nastavíš přes
+        `PUT /api/v1/settings/supplier`).
+
+        `logo_path` NELZE měnit přes mass-assign na supplier update — vždy jen
+        tímto endpointem (bezpečnost).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PNG / JPG / SVG / WebP, max 1 MiB
+      responses:
+        '200':
+          description: Logo uloženo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logo_path: { type: string, example: "storage/supplier-logos/sup-1.png" }
+                  width: { type: integer, example: 480 }
+                  height: { type: integer, example: 160 }
+        '400':
+          description: Chybí soubor / nepodporovaný formát / konverze selhala
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413':
+          description: Soubor přes 1 MiB
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Settings]
+      summary: Odebrání loga dodavatele
+      responses:
+        '200':
+          description: Logo odstraněno
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean, example: true }
+        '403':
+          description: Uživatel není admin nebo token nemá scope `read_write`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/suppliers:
     get:
@@ -6063,6 +6235,7 @@ components:
         statement_id: { type: integer, format: int64 }
         posted_at: { type: string, format: date }
         amount: { type: number, format: float, example: 12500.00 }
+        balance: { type: number, format: float, nullable: true, description: "Disponibilní zůstatek účtu z e-mailového avíza (Creditas/Fio/RB); u transakcí z GPC výpisu null." }
         currency: { type: string, nullable: true, example: CZK }
         variable_symbol: { type: string, nullable: true }
         constant_symbol: { type: string, nullable: true }
@@ -6084,6 +6257,54 @@ components:
         matched_client_name: { type: string, nullable: true }
         matched_at: { type: string, format: date-time, nullable: true }
         matched_by: { type: integer, nullable: true, description: "User ID (u ručního párování)" }
+
+    SupplierUpdate:
+      type: object
+      description: |
+        Částečný update dodavatele — pošli jen pole ke změně. Zrcadlí
+        mass-assign whitelist `PUT /api/v1/settings/supplier`; níže veřejný
+        subset (fakturační údaje, defaulty, číslování, branding). `logo_path`
+        a `signature_path` přes tento endpoint změnit NELZE (bezpečnost).
+      properties:
+        company_name: { type: string }
+        display_name: { type: string, nullable: true, description: "Obchodní/značkové jméno v hlavičce PDF a e-mailů (fallback = company_name)" }
+        street: { type: string }
+        city: { type: string }
+        zip: { type: string }
+        country_id: { type: integer }
+        ic: { type: string, nullable: true }
+        dic: { type: string, nullable: true }
+        is_vat_payer: { type: boolean }
+        email: { type: string, format: email, nullable: true }
+        phone: { type: string, nullable: true }
+        web: { type: string, nullable: true }
+        tagline: { type: string, nullable: true, description: "Podtitulek v patičce PDF a e-mailů" }
+        default_currency_id: { type: integer }
+        default_payment_due_days: { type: integer }
+        default_payment_due_unit: { type: string, enum: [days, month] }
+        default_prices_include_vat: { type: boolean }
+        invoice_number_format:
+          type: string
+          nullable: true
+          maxLength: 60
+          example: "{YY}{MM}{CCC}"
+          description: |
+            Template čísla faktury: `{YYYY}`/`{YY}` rok, `{MM}` měsíc, `{C..C}`
+            counter s paddingem dle počtu C (např. `{CCC}` → 001). Musí
+            obsahovat counter placeholder. Prázdný string / null = fallback
+            na globální cfg.
+        proforma_number_format: { type: string, nullable: true, maxLength: 60, example: "9{YY}{MM}{CCC}" }
+        credit_note_number_format: { type: string, nullable: true, maxLength: 60, example: "7{YY}{MM}{CCC}" }
+        purchase_invoice_number_format: { type: string, nullable: true, maxLength: 60, description: "Interní číslování přijatých faktur" }
+        invoice_number_period:
+          type: string
+          enum: [year, month, none]
+          description: "Reset counteru: ročně / měsíčně / nikdy (jedna průběžná řada). Společné pro všechny typy dokladů."
+        email_branding_enabled: { type: boolean, description: "Zapne logo + akcentní barvu v e-mailech a PDF" }
+        email_accent_color: { type: string, example: "#3B2D83", description: "Hex #RRGGBB; akcentní barva e-mailů a PDF faktur" }
+        pdf_logo_show_name: { type: boolean, description: "Zobrazit vedle loga v PDF i název dodavatele" }
+        auto_send_reminders: { type: boolean }
+        reminder_days_after_due: { type: integer, minimum: 1, maximum: 365 }
 
     SupplierFull:
       type: object
@@ -6119,10 +6340,12 @@ components:
         invoice_number_format:
           type: string
           nullable: true
-          example: "F{YYYY}-{####}"
-          description: "{YYYY}, {MM}, {####} placeholders. Per-supplier."
+          example: "{YY}{MM}{CCC}"
+          description: "{YYYY}/{YY}, {MM}, {C..C} placeholders (viz SupplierUpdate). Per-supplier; null = globální cfg."
         proforma_number_format: { type: string, nullable: true }
         credit_note_number_format: { type: string, nullable: true }
+        purchase_invoice_number_format: { type: string, nullable: true }
+        invoice_number_period: { type: string, enum: [year, month, none], description: "Reset counteru číselných řad" }
         taxpayer_type: { type: string, enum: [fo, po], nullable: true, description: "Fyzická / právnická osoba (EPO výkazy)" }
         vat_period: { type: string, enum: [monthly, quarterly], nullable: true }
         financial_office_code: { type: string, nullable: true, description: "Kód FÚ pro EPO (= CRPDPH cisloFu)" }

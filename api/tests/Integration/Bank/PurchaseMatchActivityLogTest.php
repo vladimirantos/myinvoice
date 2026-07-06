@@ -113,7 +113,11 @@ final class PurchaseMatchActivityLogTest extends TestCase
         $this->purchaseId = $this->statementId = $this->transactionId = 0;
     }
 
-    private function seed(float $amount): void
+    /**
+     * @param 'received'|'booked'|'paid' $status Stav přijaté faktury
+     * @param ?string $txVs VS na bankovní transakci (null = karetní platba bez VS)
+     */
+    private function seed(float $amount, string $status = 'received', ?string $txVs = self::TEST_VS): void
     {
         $pdo = $this->db->pdo();
         $d = '2099-06-15';
@@ -123,10 +127,10 @@ final class PurchaseMatchActivityLogTest extends TestCase
                 (supplier_id, vendor_id, varsymbol, vendor_invoice_number, document_kind,
                  issue_date, tax_date, due_date, received_at, currency_id, vendor_snapshot,
                  total_without_vat, total_with_vat, amount_to_pay, status, created_by)
-             VALUES (?, ?, ?, ?, 'invoice', ?, ?, ?, ?, ?, '{}', ?, ?, ?, 'received', ?)"
+             VALUES (?, ?, ?, ?, 'invoice', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)"
         )->execute([
             $this->supplierId, $this->vendorId, self::TEST_VS, self::TEST_VS,
-            $d, $d, $d, $d, $this->currencyId, $amount, $amount, $amount, $this->userId,
+            $d, $d, $d, $d, $this->currencyId, $amount, $amount, $amount, $status, $this->userId,
         ]);
         $this->purchaseId = (int) $pdo->lastInsertId();
 
@@ -136,7 +140,7 @@ final class PurchaseMatchActivityLogTest extends TestCase
              VALUES (?, ?, ?, ?, 'CZK', ?)"
         )->execute([
             self::FILE_MARKER . '.gpc',
-            hash('sha256', self::FILE_MARKER . self::TEST_VS),
+            hash('sha256', self::FILE_MARKER . self::TEST_VS . $status . ($txVs ?? 'novs')),
             $this->account, $this->bankCode, $d,
         ]);
         $this->statementId = (int) $pdo->lastInsertId();
@@ -146,7 +150,7 @@ final class PurchaseMatchActivityLogTest extends TestCase
             "INSERT INTO bank_transactions
                 (statement_id, posted_at, amount, currency, variable_symbol)
              VALUES (?, ?, ?, 'CZK', ?)"
-        )->execute([$this->statementId, $d, -$amount, self::TEST_VS]);
+        )->execute([$this->statementId, $d, -$amount, $txVs]);
         $this->transactionId = (int) $pdo->lastInsertId();
     }
 
@@ -169,5 +173,57 @@ final class PurchaseMatchActivityLogTest extends TestCase
                 AND action = 'purchase_invoice.payment_matched'"
         )->fetchColumn();
         self::assertSame(1, $logCount, 'Auto-spárování platby musí zapsat aktivitu purchase_invoice.payment_matched.');
+    }
+
+    public function testOutgoingCardPaymentMatchesPaidPurchaseByAmountAndDate(): void
+    {
+        // Karetní platba (BEZ VS) k faktuře, která je už PAID — fuzzy ji vynechá (jen
+        // received/booked), takže dřív zůstala unmatched, i když ruční nabídka kandidátů
+        // ji podle částky+data našla. Nová amount+date záchrana (zahrnuje paid, právě jeden
+        // kandidát) ji musí spárovat automaticky — bez změny statusu faktury.
+        $this->seed(2500.00, 'paid', null);
+
+        $res = $this->matcher->match($this->transactionId);
+
+        self::assertSame('auto_partial', $res['status'] ?? null, 'Karetní platba k paid faktuře se musí spárovat dle částky+data.');
+        self::assertSame($this->purchaseId, $res['purchase_invoice_id'] ?? null);
+        self::assertTrue($res['amount_date'] ?? false, 'Match má proběhnout přes amount+date záchranu.');
+
+        // Vazba je zapsaná do payment_matches; status paid faktury zůstává.
+        $pmCount = (int) $this->db->pdo()->query(
+            "SELECT COUNT(*) FROM payment_matches WHERE bank_transaction_id = {$this->transactionId} AND purchase_invoice_id = {$this->purchaseId}"
+        )->fetchColumn();
+        self::assertSame(1, $pmCount, 'Musí vzniknout jeden payment_matches záznam.');
+        self::assertSame('paid', $this->db->pdo()->query("SELECT status FROM purchase_invoices WHERE id = {$this->purchaseId}")->fetchColumn());
+    }
+
+    public function testAmbiguousAmountDateStaysUnmatched(): void
+    {
+        // Dvě přijaté faktury stejné částky+data bez VS na platbě → nejednoznačné,
+        // amount+date záchrana radši nechá unmatched (ať nespáruje špatnou).
+        $this->seed(2500.00, 'paid', null);
+        $pdo = $this->db->pdo();
+        // Druhá faktura stejné částky ve stejném okně (jiné vendor_invoice_number kvůli unikátu).
+        $secondVno = self::TEST_VS . '-B';
+        $pdo->prepare(
+            "INSERT INTO purchase_invoices
+                (supplier_id, vendor_id, varsymbol, vendor_invoice_number, document_kind,
+                 issue_date, tax_date, due_date, received_at, currency_id, vendor_snapshot,
+                 total_without_vat, total_with_vat, amount_to_pay, status, created_by)
+             VALUES (?, ?, ?, ?, 'invoice', '2099-06-15','2099-06-15','2099-06-15','2099-06-15', ?, '{}', ?, ?, ?, 'paid', ?)"
+        )->execute([
+            $this->supplierId, $this->vendorId, $secondVno, $secondVno,
+            $this->currencyId, 2500.00, 2500.00, 2500.00, $this->userId,
+        ]);
+        $secondId = (int) $pdo->lastInsertId();
+
+        try {
+            $res = $this->matcher->match($this->transactionId);
+            self::assertSame('unmatched', $res['status'] ?? null, 'Dvojznačná shoda se nesmí automaticky spárovat.');
+            self::assertSame('ambiguous_amount_date_match', $res['reason'] ?? null);
+        } finally {
+            $pdo->prepare("DELETE FROM payment_matches WHERE purchase_invoice_id = ?")->execute([$secondId]);
+            $pdo->prepare("DELETE FROM purchase_invoices WHERE id = ?")->execute([$secondId]);
+        }
     }
 }

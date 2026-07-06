@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.44.1] — 2026-07-04
+
+### Added
+
+- **Nastavení counteru číselné řady dokladů přes veřejné API.** Nový endpoint `PUT /api/v1/settings/supplier/invoice-counter` nastaví counter supplier-wide řady tak, aby příští vystavený doklad dostal zadané číslo — typicky při migraci z jiného fakturačního software (převzetí existující řady). Kolize s existujícími čísly řeší stávající self-heal, duplicitní číslo nikdy nevznikne.
+- **Upload loga dodavatele přes veřejné API.** Veřejné aliasy `POST`/`DELETE /api/v1/settings/supplier/logo` na existující branding pipeline — externí systém (SaaS integrace, provisioning) může nastavit branding faktur kompletně přes API: logo tímto endpointem, barvu/toggle/display_name/tagline přes `PUT /settings/supplier`. Žádná nová upload logika, stejný sanitizovaný pipeline (magic bytes, pixel-bomb guard, SVG sanitizace + rasterizace).
+
+### Fixed
+
+- **iDoklad import — přílohy přijatých účtenek se nikdy nestáhly (a fotky se zahazovaly).** Stahování příloh se dotazovalo jen scope `documentType=ReceivedInvoice`, ale přílohy účtenek žijí v odděleném scope `ReceivedReceipt` (SDK enum 11) — dotaz se špatným scope vrací 404, takže účtenky zůstaly bez zdrojového dokladu (`imported_pdf_path = NULL`) i s `download_attachments=true`, tiše. Navíc se archivovaly jen přílohy `%PDF` — fotka paragonu z telefonu (JPG, u účtenek nejběžnější případ) se zahodila i u přijatých faktur. Nově: přílohy účtenek se stahují přes správný scope a fotky se konvertují na PDF stejnou cestou jako ruční upload (`ImageToPdfConverter`, EXIF rotace, přejmenování `.jpg → .pdf`), takže výsledek je od ručně nahraného dokladu k nerozeznání. Výběr přílohy (preferuj PDF, jinak první obrázek) je vytažený do čisté testované funkce.
+- **Počet jednotek na PDF faktury měl zbytečné koncové nuly.** Množství se na PDF formátovalo buď jako celé číslo, nebo natvrdo na 3 desetinná místa — takže `15,25` se zobrazilo jako `15,250` a `16,2` jako `16,200`. Nově se počet desetin řídí skutečnou hodnotou (0–3 místa) a nevýznamné nuly se neuvádějí. (#187)
+
+## [4.44.0] — 2026-07-02
+
+### Added
+
+- **Zůstatek účtu z e-mailových bankovních avíz.** Avíza Banky CREDITAS („Disponibilní zůstatek"), Fio banky („Aktuální zůstatek") a Raiffeisenbank („Disponibilní zůstatek po pohybu") nesou kromě platby i aktuální zůstatek účtu — nově se při skenu vytěží a uloží k transakci (`bank_transactions.balance`, migrace 0125). Detail měsíčního avízo-výpisu, který dosud žádné souhrny neukazoval, dostal boxy: **disponibilní zůstatek** z nejnovějšího avíza, **k datu**, a součty **příjmů/výdajů** měsíce. Zůstatky z avíz se promítají i do přehledu **Stavy na účtech** — v každém měsíci i pro aktuální stav vyhrává novější údaj (avízo typicky předběhne pravidelný výpis; při shodě dne zůstává autoritativní GPC) a u data je pak štítek „z avíza". U vlastních regex parserů lze zůstatek vytěžovat novým volitelným polem `balance`. Zůstatek se ukládá od této verze — u dříve naskenovaných avíz zpětně doplnit nejde (surové tělo e-mailu se neuchovává).
+- **Odesílací e-mailové profily s vlastním SMTP transportem (#87).** Dodavatel může mít víc odesílacích identit (adres) s vlastním SMTP serverem, podpisem a volitelnou **S/MIME identitou** — profil se vybírá při odesílání dokladů. Odeslané zprávy se navíc umí **archivovat do IMAP složky** („Odeslané") daného profilu; selhání archivace neshodí samotné doručení. Kontroluje se soulad adresy From s S/MIME certifikátem (u nových i stávajících profilů default jen varování). Bez nastavených profilů se chování nemění — použije se globální SMTP. (migrace 0124)
+- **Stavy na účtech.** Nový přehled zůstatků na bankovních účtech: aktuální stav každého účtu, měsíční vývoj (graf na účet, poslední 3 roky) a celkový součet přepočtený na CZK kurzem ČNB ke konci měsíce. Zdrojem jsou konečné zůstatky z GPC výpisů (a nově i avíza, viz výše).
+- **iDoklad import — přijaté účtenky/paragony (`ReceivedReceipts`).** Import z iDokladu dosud stahoval jen `ReceivedInvoices` (přijaté faktury) a koncový bod `ReceivedReceipts` přeskakoval — přijaté účtenky/paragony se tak vůbec nepřenesly. Nově se importují do `purchase_invoices` s `document_kind='receipt'` (řídí se přes nový parametr `include_receipts`, default zapnuto). Mapování zohledňuje odlišnosti účtenky od faktury: účtenka nemá splatnost (`DateOfMaturity`) ani DUZP (`DateOfTaxing`) → `issue_date`/`tax_date`/`due_date` se odvodí z `DateOfIssue`, a číslo dokladu dodavatele je `ExternalDocumentNumber` (fallback `DocumentNumber`). Hotovostní účtenka bez kontaktu (`Partner` = null) se **naváže na sběrného systémového dodavatele „Hotovostní nákup (účtenka)"** (aby se náklad neztratil) a importuje se **bez nároku na odpočet DPH** (`vat_deduction='none'`) s upozorněním k doplnění dodavatele — u plátce tak nevzniká chybný odpočet, u neplátce je to bez dopadu. Dedup přes `idoklad_id` i `(vendor, číslo, datum)` zůstává — opakovaný import nepřidává duplicity. Položkové ceny i rekapitulace DPH se skládají z autoritativních per-řádkových `Prices` stejně jako u přijatých faktur (řeší i ceny s DPH na účtenkách). Účtenka je hrazená na místě, takže se importuje rovnou jako **zaplacená** (`paid_at` = datum vystavení), pokud iDoklad nevrátí konkrétnější stav úhrady.
+
+### Changed
+
+- **Bankovní stránky sjednocené pod Finance → „Bankovní účty".** Bývalá stránka *Systém → Bankovní účty* (Měny a účty / Stavy na účtech / Bankovní avíza z e-mailu) se přesunula jako záložky na stránku s bankovními výpisy — vše bankovní je teď na jednom místě se **4 záložkami**: *Bankovní výpisy* | *Měny a účty* | *Stavy na účtech* | *Bankovní avíza z e-mailu*. Záložky kromě výpisů vidí jen administrátor (stejná oprávnění jako dřív); položka v menu Systém zmizela. Staré odkazy a záložky prohlížeče (`/admin/bank-accounts`, i s `?tab=`) se automaticky přesměrují.
+
+### Fixed
+
+- **Zpracovaná avíza — stav se odvozuje z živého párování transakce.** Přehled „Zpracované e-maily" ukazoval stav zamrzlý z okamžiku skenu: avízo dodatečně spárované ručně zůstávalo jako *match_failed*, a naopak později rozpárovaná transakce dál vypadala jako úspěch. Stav se nově dopočítává z aktuálního stavu párování navázané bankovní transakce.
+- **Výkaz práce pro neplátce DPH — bez sazby DPH (#181).** Výkaz práce dodavatele-neplátce nabízel volbu sazby DPH a zapékal ji do fakturovaných položek. Nově se u neplátce sazba v UI výkazu nenabízí a položky vzniklé z výkazu se fakturují bez DPH.
+
+## [4.43.4] — 2026-07-01
+
+### Fixed
+
+- **Párování bankovního výpisu (GPC) — zaplacené faktury se nepřeskočí.** Vystavená faktura, která už byla označená jako zaplacená (`paid`, `paid_total` = plná částka), se při importu i automatickém přepárování porovnávala proti zbývajícímu dluhu (= 0), takže plná platba nikdy nesedla a faktura zůstala ve výpisu jako *Nespárováno*. Nově se u již zaplacené faktury porovnává proti celkové částce dokladu a transakce se na ni jen naváže (stav ani datum úhrady se nemění, nevzniká duplicitní platba). Projevovalo se zejména při re-importu téže platby nebo když byla úhrada zaznamenaná dřív (jiná transakce / ruční záznam).
+- **Párování — uhrazené zálohové faktury (proforma) se nyní spárují.** Uhrazená záloha s vystaveným (a taky vyrovnaným) finálním dokladem se nepárovala: matcher platbu vždy přesměroval na finál, který ovšem u uhrazené zálohy nese `k úhradě` = 0 (pohledávku i platbu drží proforma), takže se porovnávala proti nule. Přesměrování na finál teď proběhne jen když je co doplácet (finál nese otevřenou pohledávku nebo proforma ještě není uhrazená); u plně vyrovnané zálohy se potvrzující platba naváže přímo na proformu.
+- **Párování odchozích plateb — karetní/bez VS platby se párují jako v ruční nabídce.** Automatické párování odchozích (záporných) plateb na přijaté faktury dosud u plateb bez variabilního symbolu (typicky karetní — GitHub, Anthropic, Alza…) vyžadovalo shodu názvu protistrany a vynechávalo už zaplacené faktury, takže se nespárovaly, přestože je ruční nabídka kandidátů podle částky a data našla. Přibyla poslední záchrana: shoda podle **částky (±1 Kč / 4 % u cizí měny) a data (±14 dní)** včetně zaplacených faktur — spáruje se ale jen při **právě jednom** jednoznačném kandidátovi (jinak zůstane nespárováno k ruční kontrole; už spárované doklady se vylučují).
+
 ## [4.43.3] — 2026-06-30
 
 ### Added
