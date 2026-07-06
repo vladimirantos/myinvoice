@@ -95,13 +95,13 @@ isolovaný diff; zapsat do `docs/FORK-CHANGES.md` jako KEEP fork přídavek.
 
 ## Komponenta B — druhý Rosti stack (provisioning)
 
-- Nový stack na Rosti, vlastní doména **`invoice.youarespotted.com`**.
+- Nový stack na Rosti, vlastní doména **`invoice.spotted-ai.com`**.
 - Vlastní čistý `/data` volume → čistá DB + prázdné storage. První deploy: `docker-entrypoint.sh`
   pustí `migrate.php`, projedou se všechny migrace na prázdné DB (žádný ruční krok).
 - Vlastní `docker-compose.rosti.spotted.yml` (**gitignored**, secrets) — odvozený z dnešního
   `docker-compose.rosti.yml`, ale s:
   - vlastními DB credentials (jiné heslo),
-  - `MYINVOICE_APP_URL: https://invoice.youarespotted.com`,
+  - `MYINVOICE_APP_URL: https://invoice.spotted-ai.com`,
   - SMTP nové firmy (vlastní schránka / From),
   - **čerstvě vygenerovanými** `MYINVOICE_PEPPER` a `MYINVOICE_SECRET_KEY` (NE kopírovat ze
     stávající instance),
@@ -153,4 +153,4 @@ Změna:
 ## Potvrzeno
 
 - Slug: **`spotted`** (názvy souborů + ENV).
-- Doména: **`invoice.youarespotted.com`**.
+- Doména: **`invoice.spotted-ai.com`**.

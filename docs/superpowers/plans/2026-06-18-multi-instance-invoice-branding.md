@@ -645,7 +645,7 @@ git commit -m "chore: gitignore docker-compose.rosti.*.yml (per-stack secrets)"
 - [ ] **Step 3: Vytvoř lokální compose pro spotted (mimo git)**
 
 Zkopíruj `docker-compose.rosti.yml` → `docker-compose.rosti.spotted.yml` a uprav:
-- `MYINVOICE_APP_URL: "https://invoice.youarespotted.com"`
+- `MYINVOICE_APP_URL: "https://invoice.spotted-ai.com"`
 - `MYINVOICE_INVOICE_TEMPLATE: "spotted"`  *(nový řádek do `environment:` app služby)*
 - nové DB heslo (app i db sekce), `MYINVOICE_DB_PASS` = `MARIADB_PASSWORD`
 - **čerstvé** `MYINVOICE_PEPPER` a `MYINVOICE_SECRET_KEY`:

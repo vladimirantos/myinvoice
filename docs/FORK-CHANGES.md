@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.43.3** (merge 2026-06-30; předtím v4.42.0, v4.33.0, v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.44.1** (merge 2026-07-06; předtím v4.43.3, v4.42.0, v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -163,4 +163,19 @@ Nová migrace `0123_purchase_invoice_source_artifact.sql` — **bez kolize** s n
 (ta zůstává `0113_mark_all_invoices_paid.sql`; dobře, že nebyla minule přečíslována na 0123).
 
 ---
-_Naposledy aktualizováno: 2026-06-30 (merge upstream v4.43.3)._
+## J. Merge v4.44.1 (2026-07-06) — bez konfliktů
+
+Čistý auto-merge (odesílací e-mailové profily + S/MIME, bankovní zůstatky z avíz, iDoklad
+přijaté účtenky, veřejné API logo/counter, Scalar API reference). Nové migrace `0124`, `0125` —
+bez kolize s naší `0113`. Naše design/razítko/branding soubory beze změny (`Routes.php`,
+`Mailer.php`, `EmailBrandingAction.php`, `settings.ts` = auto-merge, fork bloky přežily).
+
+**Ručně přeneseno do `spotted.twig`:** upstream fix `9109a1b` (počet jednotek bez
+nevýznamných koncových nul) — stejná změna `item.quantity|number_format` jako v `invoice.twig`.
+
+**Doména spotted instance (2026-07-06):** `invoice.youarespotted.com` → **`invoice.spotted-ai.com`**
+(docs + `docker-compose.rosti.spotted.yml`; pozor — autoritativní compose je Rosti panel na stacku 542,
+`MYINVOICE_APP_URL` je nutné změnit i tam).
+
+---
+_Naposledy aktualizováno: 2026-07-06 (merge upstream v4.44.1 + doména spotted-ai.com)._
