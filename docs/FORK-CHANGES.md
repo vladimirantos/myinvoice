@@ -174,8 +174,10 @@ bez kolize s naší `0113`. Naše design/razítko/branding soubory beze změny (
 nevýznamných koncových nul) — stejná změna `item.quantity|number_format` jako v `invoice.twig`.
 
 **Doména spotted instance (2026-07-06):** `invoice.youarespotted.com` → **`invoice.spotted-ai.com`**
-(docs + `docker-compose.rosti.spotted.yml`; pozor — autoritativní compose je Rosti panel na stacku 542,
-`MYINVOICE_APP_URL` je nutné změnit i tam).
+(docs + `docker-compose.rosti.spotted.yml` + živý panel compose na stacku 542 — `MYINVOICE_APP_URL`
+změněn přes `rosticli stacks ssh --stack-id 542 --company 7570`, záloha `docker-compose.yml.bak-domain`;
+SMTP `info@youarespotted.com` záměrně ponechán — je to login ke schránce. Stack 542 JE dosažitelný
+přes rosticli, dřívější poznámka „nedosáhne" platila jen pro CI webhook.)
 
 ---
 _Naposledy aktualizováno: 2026-07-06 (merge upstream v4.44.1 + doména spotted-ai.com)._
