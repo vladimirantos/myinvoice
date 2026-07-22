@@ -125,6 +125,22 @@ final class ApiScopeMiddlewareTest extends TestCase
         self::assertSame('token_endpoint_forbidden', $this->errorCode($r));
     }
 
+    public function testBearerReadCanUseInvoiceExports(): void
+    {
+        // Hromadný export + per-faktura ISDOC jsou verejné GETy pod /api/invoices —
+        // bearer token se scope `read` na ně dosáhne (na rozdíl od /api/admin/export).
+        foreach ([
+            '/api/invoices/export',
+            '/api/invoices/42/isdoc',
+        ] as $path) {
+            $r = $this->middleware()->process(
+                $this->bearer('GET', $path, 'read'),
+                $this->okHandler(),
+            );
+            self::assertSame(204, $r->getStatusCode(), "bearer GET $path");
+        }
+    }
+
     public function testBearerReadCannotWriteAllowedResource(): void
     {
         // Path je povolená, ale read scope nesmí POST → insufficient_scope (NE path).

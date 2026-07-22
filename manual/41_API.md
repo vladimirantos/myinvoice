@@ -180,9 +180,28 @@ curl -X POST https://mojefirma.example/api/v1/settings/supplier/logo \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@logo.png"
 # → { "logo_path": "storage/supplier-logos/sup-1.png", "width": 480, "height": 160 }
+
+## 41.9 Export faktur přes API
+
+- **`GET /api/v1/invoices/export?format=pdf-zip|isdoc|pohoda|stereo&month=YYYY-MM`**
+  — hromadný export vystavených dokladů za měsíc (nebo
+  `period=quarterly&year=YYYY&quarter=1..4`). PDF ZIP, ISDOC, Pohoda či Stereo
+  XML; `date_by=tax` zařazuje dle DUZP (shodně s výkazy DPH). Pro PDF lze
+  `merge_pdf=true` vrátit jeden soubor místo ZIPu a současně `sign_pdf=true`
+  podepsat výsledný celek.
+- **`GET /api/v1/invoices/export.pdf?ids=125,124,119`** — spojí nejvýše 100
+  konkrétních faktur do jednoho PDF v uvedeném pořadí. Výstup neobsahuje přílohy,
+  ISDOC ani výkazy práce. Volitelné `sign_pdf=true` podepíše výsledný soubor.
+- **`GET /api/v1/invoices/{id}/isdoc`** — ISDOC XML jedné vystavené faktury
+  (koncept nelze, 400). PDF varianta existovala už dřív
+  (`GET /api/v1/invoices/{id}/pdf`).
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -OJ \
+  "https://mojefirma.example/api/v1/invoices/export?format=isdoc&month=2026-06"
 ```
 
-## 41.9 Bezpečnost tokenů — best practices
+## 41.10 Bezpečnost tokenů — best practices
 
 - **Ukládej token jako secret** (password manager, Make encrypted variable, GitHub Secrets…).
   Nepushuj do gitu.
@@ -193,7 +212,7 @@ curl -X POST https://mojefirma.example/api/v1/settings/supplier/logo \
 - **Sleduj `last_used_at`** v UI — token, který se 3 měsíce nepoužil, asi nepotřebuješ.
 - **Při ztrátě/podezření** — okamžitě **Zrušit** v UI. Revokace je instantní (žádný cache).
 
-## 41.10 Co API nepokrývá
+## 41.11 Co API nepokrývá
 
 - **Admin a settings endpointy** (`/api/admin/*` a `/api/settings/*` mimo
   veřejný subset — supplier, číselníky) nejsou v `openapi.yaml` - jsou určené

@@ -200,4 +200,48 @@ Spec: `docs/superpowers/specs/2026-07-06-poznamky-design.md`.
 (hlavní pravidlo). Extrakce `markdown.ts` je jinak neutrální refaktor — držet naši verzi.
 
 ---
-_Naposledy aktualizováno: 2026-07-06 (merge upstream v4.44.1 + doména spotted-ai.com + poznámky)._
+
+## L. Merge v4.49.2 (2026-07-22) — 1 konflikt
+
+91 commitů (v4.44.1 → v4.49.2). Hlavní upstream přírůstky: veřejná webová faktura
+(public link + e-mail přílohy), hromadný PDF export faktur, ceníkové položky, OSS evidence
++ EPO export, Money S3 XML export, PDF import výpisů (Creditas/ČSOB/KB/RB), iDoklad bankovní
+pohyby a mapování účtů, rozšířené KH klasifikace DPH, hlavní e-mail klienta nepovinný.
+
+**Náš design faktury: BEZ ZMĚNY.** Upstream se v tomhle rozsahu vůbec nedotkl
+`api/templates/invoice/*.twig`, `styles/*.css` ani `PdfBranding.php` — ověřeno
+`git diff master --stat -- api/templates/invoice/ styles/ …` = prázdné.
+
+**Jediný konflikt: `api/src/Service/Pdf/InvoicePdfRenderer.php`**
+Upstream vytáhl konstrukci `new Mpdf([...])` do privátní metody `newMpdf($tmpDir)` (potřebuje
+ji nová `renderUnsignedInvoiceOnly()` pro hromadný tisk). **Adoptovali jsme jejich extrakci**
+(je to čistý refaktor + nová funkce ji vyžaduje) a **do `newMpdf()` vrátili naše marginy**
+(`margin_bottom 26`, `margin_footer 9`, side 15 — kvůli 3řádkové patičce, viz sekce H).
+Náš `resolvedTemplate()` seam v `renderHtmlAndCss()` auto-mergem přežil → varianta `spotted`
+i nadále bere vlastní twig/CSS. Nová `renderUnsignedInvoiceOnly()` jde přes `renderHtmlAndCss()`,
+takže hromadný export respektuje variantu automaticky.
+
+**Migrace: `0126_notes.sql` → `0140_notes.sql`** (`git mv`). Upstream přidal vlastní
+`0126_vat_classification_exempt_line50.sql` až po `0139` (jeho max). Naše notes migrace je
+idempotentní (`CREATE TABLE IF NOT EXISTS`) → re-run po přečíslování je bezpečný (pravidlo
+ze sekce H splněno). Naše `0113_mark_all_invoices_paid.sql` zůstává **nepřečíslovaná** (není
+idempotentní — viz varování v sekci H). Pozor do příště: nevydaný upstream master už má
+`0141–0144` (brandingové profily), takže další fork migrace ber od `0145` výš.
+
+**Infra beze změny:** `release.yml`, `docker-entrypoint.sh`, `.gitignore`, `.dockerignore`
+= 0 změn (upstream sáhl jen na svůj `docker-publish.yml`). Fork bloky přežily auto-merge
+v `Routes.php` (poznámky), `Settings.vue` / `settings.ts` (razítko), `AppLayout.vue` +
+`router/index.ts` + `i18n/{cs,en}.json` (menu Poznámky), `Update.vue` (import `markdown.ts`).
+
+**Editovatelné šablony faktury upstream stále NEMÁ** (rozhodnutí #43 trvá). Nevydaný master
+přidal „brandingové profily" (#229) = více vizuálních identit pod jedním dodavatelem, ale jen
+na úrovni **dat** (logo, název, slogan, kontakty, barva, patička e-mailu) — Twig/PDF šablony
+jsou z rozsahu záměrně vyřazené. Naše `MYINVOICE_INVOICE_TEMPLATE` varianta (sekce G) tedy
+zůstává jediná cesta k vlastnímu layoutu.
+
+**Ověřeno lokálně:** `vue-tsc --noEmit` ✓, `npm run build` ✓, `php -l` na všech změněných PHP
+souborech ✓. **PHPUnit lokálně NEspustitelný** — repo vyžaduje `php ^8.5` (Docker runtime
+`php:8.5-apache`), lokální CLI je 8.4.23 a Docker daemon neběžel. Testy nechat doběhnout v CI.
+
+---
+_Naposledy aktualizováno: 2026-07-22 (merge upstream v4.49.2)._
