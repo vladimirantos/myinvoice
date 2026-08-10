@@ -5,6 +5,25 @@ export type SelfCopyType = 'documents' | 'reminders' | 'approvals'
 /** off = neposílat, cc/bcc = role kopie dodavatele. */
 export type SelfCopyMode = 'off' | 'cc' | 'bcc'
 
+/** Položka číselníku ČINNOSTI (CZ-NACE / c_okec) — našeptávač v daňovém nastavení. */
+export interface NaceCode {
+  /** Kanonická hodnota do `c_okec` (sekce 01–09 vede číselník bez vodicí nuly: 14800). */
+  code: string
+  /** Čitelný zápis třídy — 731100 → „73.11.00". */
+  display: string
+  name: string
+  valid_from: string
+}
+
+/** Stav uloženého CZ-NACE proti číselníku — `expired` po přechodu na NACE rev. 2.1. */
+export interface NaceResolved {
+  code: string
+  display: string
+  name: string | null
+  status: 'active' | 'expired' | 'unknown'
+  valid_to: string | null
+}
+
 export interface Supplier {
   id: number
   company_name: string
@@ -59,6 +78,7 @@ export interface Supplier {
   email_branding_enabled: boolean
   email_accent_color: string  // #RRGGBB
   pdf_logo_show_name: boolean // vedle loga v PDF zobrazit i název firmy (migrace 0058)
+  branding_profiles_enabled: boolean
   has_email_logo?: boolean    // server flag (existence storage/supplier-logos/sup-{id}.png)
   has_signature?: boolean     // server flag (existence storage/supplier-signatures/sup-{id}.png)
   // Děkovný e-mail za úhradu (issue #57)
@@ -84,7 +104,10 @@ export interface Supplier {
   financial_office_code?: string | null
   workplace_code?: string | null
   cz_nace_code?: string | null
-  data_box_type?: string | null
+  /** Uložený CZ-NACE přeložený přes číselník ČINNOSTI (read-only, dopočítává backend). */
+  cz_nace_resolved?: NaceResolved | null
+  /** Upozornění k CZ-NACE po uložení (expirovaný/neznámý kód) — jen v odpovědi PUT. */
+  cz_nace_warning?: string
   data_box_id?: string | null
   sest_jmeno?: string | null
   sest_prijmeni?: string | null
@@ -105,6 +128,26 @@ export interface Supplier {
     credit_note: string
     purchase: string
   }
+}
+
+export interface BrandingProfile {
+  id: number
+  supplier_id: number
+  name: string
+  display_name: string | null
+  tagline: string | null
+  email: string | null
+  reply_to: string | null
+  email_profile_id: number | null
+  phone: string | null
+  web: string | null
+  email_footer: string | null
+  logo_path: string | null
+  accent_color: string
+  branding_enabled: boolean
+  pdf_logo_show_name: boolean
+  is_active: boolean
+  is_default: boolean
 }
 
 export interface CurrencyAccount {
@@ -576,6 +619,15 @@ export const settingsApi = {
   getSupplier: () => api.get<Supplier>('/settings/supplier').then(r => r.data),
   updateSupplier: (payload: Partial<Supplier>) => api.put<Supplier>('/settings/supplier', payload).then(r => r.data),
 
+  /**
+   * Našeptávač CZ-NACE — vrací jen kódy platné k dnešku. ARES eviduje ještě
+   * NACE rev. 2, číselník EPO je od 1. 1. 2026 na rev. 2.1, takže prefill
+   * z ARES často přinese expirovaný kód a uživatel si tu najde nástupce.
+   * Prázdný `q` vrátí první stránku; jinak prefix kódu nebo hledání v názvu.
+   */
+  searchNaceCodes: (q: string, limit = 20) =>
+    api.get<{ items: NaceCode[] }>('/settings/nace-codes', { params: { q, limit } }).then(r => r.data.items),
+
   listCurrencies: () => api.get<CurrencyAccount[]>('/settings/currencies').then(r => r.data),
   createCurrency: (payload: Partial<CurrencyAccount>) =>
     api.post<{ id: number; code: string }>('/settings/currencies', payload).then(r => r.data),
@@ -683,6 +735,26 @@ export const settingsApi = {
   },
   deleteSignature: () => api.delete('/settings/email-branding/signature').then(r => r.data),
 
+  listBrandingProfiles: () =>
+    api.get<BrandingProfile[]>('/settings/branding-profiles').then(r => r.data),
+  createBrandingProfile: (payload: Partial<BrandingProfile>) =>
+    api.post<BrandingProfile>('/settings/branding-profiles', payload).then(r => r.data),
+  updateBrandingProfile: (id: number, payload: Partial<BrandingProfile>) =>
+    api.put<BrandingProfile>(`/settings/branding-profiles/${id}`, payload).then(r => r.data),
+  deleteBrandingProfile: (id: number) =>
+    api.delete<{ deleted: boolean }>(`/settings/branding-profiles/${id}`).then(r => r.data),
+  setDefaultBrandingProfile: (id: number) =>
+    api.post<BrandingProfile>(`/settings/branding-profiles/${id}/default`, {}).then(r => r.data),
+  uploadBrandingProfileLogo: (id: number, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post<BrandingProfile>(`/settings/branding-profiles/${id}/logo`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then(r => r.data)
+  },
+  deleteBrandingProfileLogo: (id: number) =>
+    api.delete<BrandingProfile>(`/settings/branding-profiles/${id}/logo`).then(r => r.data),
+
   getPdfSigningDiagnostics: () =>
     api.get<PdfSigningDiagnostics>('/settings/pdf-signing/diagnostics').then(r => r.data),
   getSigningSettings: () =>
@@ -750,6 +822,10 @@ export const settingsApi = {
   deletePdfSignatureDocumentSelection: (entityType: PdfSignatureDocumentEntityType, id: number) =>
     api.delete<PdfSignatureDocumentSelection>(`/documents/${entityType}/${id}/signature-selection`).then(r => r.data),
   // Vrací HTML string — frontend ho pak nacpe do iframe.srcdoc (obejde X-Frame-Options DENY).
-  emailPreviewHtml: (locale: 'cs' | 'en' = 'cs') =>
-    api.get<string>(`/settings/email-branding/preview?locale=${locale}`, { responseType: 'text', transformResponse: [(d) => d] }).then(r => r.data),
+  emailPreviewHtml: (locale: 'cs' | 'en' = 'cs', brandingProfileId: number | null = null) =>
+    api.get<string>('/settings/email-branding/preview', {
+      params: { locale, ...(brandingProfileId !== null ? { branding_profile_id: brandingProfileId } : {}) },
+      responseType: 'text',
+      transformResponse: [(d) => d],
+    }).then(r => r.data),
 }

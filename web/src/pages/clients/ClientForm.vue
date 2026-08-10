@@ -8,6 +8,7 @@ import { expenseCategoriesApi, type ExpenseCategory } from '@/api/expenseCategor
 import { revenueCategoriesApi, type RevenueCategory } from '@/api/revenueCategories'
 import { useToast } from '@/composables/useToast'
 import { useSupplierStore } from '@/stores/supplier'
+import { settingsApi, type BrandingProfile } from '@/api/settings'
 
 /**
  * V `embedded` módu komponenta nečte route, neredirektuje a vrací výsledek
@@ -25,6 +26,7 @@ const emit = defineEmits<{
 const { t, locale } = useI18n()
 const toast = useToast()
 const supplierStore = useSupplierStore()
+const brandingProfiles = ref<BrandingProfile[]>([])
 
 const route = useRoute()
 const router = useRouter()
@@ -86,6 +88,8 @@ const supplierDueLabel = computed(() => {
 
 const form = ref<ClientPayload>({
   company_name: '',
+  first_name: null,
+  last_name: null,
   ic: null,
   dic: null,
   tax_number: null,
@@ -114,6 +118,7 @@ const form = ref<ClientPayload>({
   proforma_number_format: null,
   credit_note_number_format: null,
   invoice_number_period: null,
+  default_branding_profile_id: null,
 })
 
 // Pro lock UI — counts of issued/received invoices se hodí znát, aby user věděl
@@ -214,16 +219,18 @@ async function loadVatPayerDetails() {
 }
 
 onMounted(async () => {
-  const [c, cur, ec, rc] = await Promise.all([
+  const [c, cur, ec, rc, bp] = await Promise.all([
     codebooksApi.countries(),
     codebooksApi.currencies(),
     expenseCategoriesApi.list(false).catch(() => [] as ExpenseCategory[]),  // jen aktivní
     revenueCategoriesApi.list(false).catch(() => [] as RevenueCategory[]),  // jen aktivní
+    settingsApi.listBrandingProfiles().catch(() => [] as BrandingProfile[]),
   ])
   countries.value = c
   currencies.value = cur
   expenseCategories.value = ec
   revenueCategories.value = rc
+  brandingProfiles.value = bp.filter(p => p.is_active)
   if (form.value.currency_default_id === 0) {
     const def = cur.find(x => x.is_default && x.code === 'CZK') || cur[0]
     if (def) form.value.currency_default_id = def.id
@@ -284,6 +291,7 @@ function sanitize(c: Client): Partial<ClientPayload> {
     proforma_number_format: c.proforma_number_format ?? null,
     credit_note_number_format: c.credit_note_number_format ?? null,
     invoice_number_period: c.invoice_number_period ?? null,
+    default_branding_profile_id: c.default_branding_profile_id ?? null,
   }
 }
 
@@ -478,7 +486,16 @@ async function submit() {
             </div>
           </div>
           <div v-if="viesResult" class="mt-2 text-xs">
-            <span v-if="viesResult.valid" class="text-primary-700">✓ {{ t('client.dic_valid', { dic: t('client.dic'), name: viesResult.name }) }}</span>
+            <!-- Registr plátců DPH (skupinová registrace CZ699…) ověří platnost, ale
+                 název subjektu nevrací — bez tohohle rozlišení by hláška končila
+                 visící pomlčkou („DIČ je platné — "). -->
+            <span v-if="viesResult.valid && viesResult.name" class="text-primary-700">✓ {{ t('client.dic_valid', { dic: t('client.dic'), name: viesResult.name }) }}</span>
+            <span v-else-if="viesResult.valid && viesResult.group_registration" class="text-primary-700">✓ {{ t('client.dic_valid_group', { dic: t('client.dic') }) }}</span>
+            <span v-else-if="viesResult.valid" class="text-primary-700">✓ {{ t('client.dic_valid_no_name', { dic: t('client.dic') }) }}</span>
+            <!-- Nedostupný registr/VIES je soft error (ViesClient vrací valid:false,
+                 source:'error') — hlásit ho jako „DIČ není platné" by byl falešný
+                 negativ, uživatel by opravoval správně zadané DIČ. -->
+            <span v-else-if="viesResult.source === 'error'" class="text-warning-700">{{ t('client.dic_check_unavailable') }}</span>
             <span v-else class="text-danger-500">✗ {{ t('client.dic_invalid', { dic: t('client.dic') }) }}</span>
           </div>
 
@@ -546,6 +563,21 @@ async function submit() {
           <input autocomplete="off" v-model="form.company_name" required
             class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
           <p v-if="errors.company_name" class="text-xs text-danger-500 mt-1">{{ errors.company_name[0] }}</p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.first_name') }}</label>
+            <input autocomplete="off" v-model="form.first_name" maxlength="60"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+            <p v-if="errors.first_name" class="text-xs text-danger-500 mt-1">{{ errors.first_name[0] }}</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.last_name') }}</label>
+            <input autocomplete="off" v-model="form.last_name" maxlength="60"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+            <p v-if="errors.last_name" class="text-xs text-danger-500 mt-1">{{ errors.last_name[0] }}</p>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -786,6 +818,15 @@ async function submit() {
           <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.note') }}</label>
           <textarea autocomplete="off" v-model="form.note" rows="2"
             class="w-full px-3 py-2 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"></textarea>
+        </div>
+
+        <div v-if="form.is_customer && brandingProfiles.length" class="pt-3 border-t border-neutral-100">
+          <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.branding_profile') }}</label>
+          <select v-model="form.default_branding_profile_id" class="w-full h-10 px-3 border border-neutral-300 rounded-md bg-surface">
+            <option :value="null">{{ t('client.branding_profile_default') }}</option>
+            <option v-for="profile in brandingProfiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+          </select>
+          <p class="text-xs text-neutral-500 mt-1">{{ t('client.branding_profile_hint') }}</p>
         </div>
 
         <!-- Per-client číselná řada (volitelná) -->

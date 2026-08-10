@@ -19,19 +19,24 @@ declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
 
+// STDOUT/STDERR existují jen v CLI SAPI. Tento skript lze spustit i z admin UI
+// („Plánované úlohy → spustit teď") a na sdíleném hostingu může spawn skončit
+// pod php-cgi/FastCGI, kde konstanty chybí — bez polyfillu by fwrite(STDERR) fataloval.
+if (!defined('STDERR')) {
+    define('STDERR', fopen('php://stderr', 'wb'));
+}
+
 use MyInvoice\Bootstrap;
-use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Cron\CronRun;
 use MyInvoice\Service\Update\VersionService;
 
-$rootDir = Bootstrap::rootDir();
-$config  = Config::load($rootDir);
-$conn    = new Connection($config);
+$container = Bootstrap::buildApp()->getContainer();
+$conn = $container->get(Connection::class);
 
 $run = CronRun::start($conn->pdo(), 'cron-version-check');
 
-$svc    = new VersionService($conn);
+$svc    = $container->get(VersionService::class);
 $status = $svc->refreshLatestVersion();
 
 $current = $status['current'] ?? '?';

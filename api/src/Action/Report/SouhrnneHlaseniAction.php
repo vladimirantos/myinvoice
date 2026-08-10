@@ -29,7 +29,21 @@ final class SouhrnneHlaseniAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly \MyInvoice\Service\Report\TaxSubmissionArchiver $archiver,
+        private readonly \MyInvoice\Service\Currency\MissingExchangeRateFiller $rateFiller,
+        private readonly \MyInvoice\Service\Report\EpoIdentityValidator $epoValidator,
     ) {}
+
+    /**
+     * EPO identifikace: chybějící XSD-povinná pole → 422 při STAŽENÍ XML, viz
+     * EpoIdentityValidator. Bez nich vznikne validně vypadající XML, které EPO
+     * portál odmítne. Náhled se neblokuje (pole vrací v `missing[]`).
+     */
+    private function epoIdentityError(Response $response, array $missing): Response
+    {
+        return Json::error($response, 'epo_identity_incomplete',
+            'Nelze vygenerovat XML — chybí povinné údaje pro EPO podání. Doplň je v Nastavení → Daňové nastavení.',
+            422, ['missing' => $missing, 'settings_url' => '/admin/settings#epo']);
+    }
 
     public function preview(Request $request, Response $response): Response
     {
@@ -42,12 +56,21 @@ final class SouhrnneHlaseniAction
         if ($year === null) {
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
+        // Náhled se NEBLOKUJE ani při chybějící identifikaci — čísla výkazu si
+        // uživatel musí umět zobrazit. Chybějící povinná pole jdou do
+        // `missing[]`, na jejich základě UI zakáže stažení XML.
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHSHV);
         try {
             $result = $this->builder->build($supplierId, $year, $month, $period);
         } catch (\Throwable $e) {
             return Json::error($response, 'build_failed', $e->getMessage(), 500);
         }
-        return Json::ok($response, ['summary' => $result['summary'], 'warnings' => $result['warnings']]);
+        return Json::ok($response, [
+            'summary'  => $result['summary'],
+            'missing'  => $epo['missing'],
+            // Doporučená pole (ÚzP, opr_*, telefon…) jen varují.
+            'warnings' => array_merge($result['warnings'], $epo['warnings']),
+        ]);
     }
 
     public function download(Request $request, Response $response): Response
@@ -61,8 +84,24 @@ final class SouhrnneHlaseniAction
         if ($year === null) {
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHSHV);
+        if ($epo['missing'] !== []) {
+            return $this->epoIdentityError($response, $epo['missing']);
+        }
         try {
             $result = $this->builder->build($supplierId, $year, $month, $period);
+            // #238: chybí-li u cizoměnných dokladů kurz, doplň z ČNB (oficiální kurz
+            // k DUZP) a přebuildi. Tvrdá chyba jen když ČNB kurz nezná ani po doplnění.
+            if (!empty($result['missing_rates'])) {
+                $this->rateFiller->fill($supplierId, $result['missing_rates']);
+                $result = $this->builder->build($supplierId, $year, $month, $period);
+                if (!empty($result['missing_rates'])) {
+                    $labels = \MyInvoice\Service\Report\VatLedgerService::missingExchangeRateLabels($result['missing_rates']);
+                    return Json::error($response, 'exchange_rate_missing',
+                        'Nelze vytvořit XML: ČNB nemá kurz pro doklady ' . implode(', ', $labels)
+                        . '. Doplňte kurz ručně u faktury a zkuste znovu.', 422);
+                }
+            }
         } catch (\Throwable $e) {
             return Json::error($response, 'build_failed', $e->getMessage(), 500);
         }

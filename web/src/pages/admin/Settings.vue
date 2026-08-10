@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode } from '@/api/settings'
+import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode, type NaceCode, type NaceResolved } from '@/api/settings'
 import { adminApi, type SampleDataStatus } from '@/api/admin'
 import { clientsApi } from '@/api/clients'
 import { useSupplierStore } from '@/stores/supplier'
 import { useToast } from '@/composables/useToast'
 import { renderVarsymbolTemplate, hasCounterPlaceholder } from '@/utils/varsymbol'
+import { formatDate } from '@/composables/useFormat'
+import BrandingProfilesSettings from '@/components/settings/BrandingProfilesSettings.vue'
+import SearchableSelect from '@/components/ui/SearchableSelect.vue'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -59,6 +62,11 @@ async function loadCommercialRegister() {
   crLoading.value = true
   try {
     const r = await clientsApi.lookupAres(ic)
+    // BUG 7: ARES u některých subjektů eviduje jen oddíl NACE (2 číslice) —
+    // prefill zůstává prázdný a uživatel má doplnit konkrétní třídu ručně.
+    if (r.found && (r.data as any)?.cz_nace_note && !(supplier.value as any)?.cz_nace_code) {
+      toast.info((r.data as any).cz_nace_note)
+    }
     if (r.found && r.data?.commercial_register && supplier.value) {
       supplier.value.commercial_register = r.data.commercial_register
       toast.success(t('settings.commercial_register_loaded'))
@@ -130,6 +138,84 @@ const creditNoteFormatError = computed(() => validateAndPreview(supplier.value?.
 const purchasePreview       = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).preview)
 const purchaseFormatError   = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).error)
 
+// EPO — klientská kontrola polí pro elektronická podání (DPH/KH/DPFO/DPPO).
+// Sada musí zůstat shodná s EpoIdentityValidator na backendu: POVINNÁ jsou jen
+// pole, která mají v EPO schématech use="required" (blokují stažení XML),
+// ostatní jsou doporučená (v XSD optional — jen upozornění).
+const epoFieldEmpty = (v: unknown) => !(v ?? '').toString().trim()
+const epoMissingLocal = computed<string[]>(() => {
+  const s = supplier.value as any
+  if (!s) return []
+  return ['financial_office_code', 'dic', 'taxpayer_type'].filter((f) => epoFieldEmpty(s[f]))
+})
+const epoRecommendedLocal = computed<string[]>(() => {
+  const s = supplier.value as any
+  if (!s) return []
+  const fields = ['workplace_code', 'email', 'phone', 'cz_nace_code']
+  if (s.taxpayer_type === 'po') fields.push('opr_jmeno', 'opr_prijmeni', 'opr_postaveni')
+  return fields.filter((f) => epoFieldEmpty(s[f]))
+})
+
+// CZ-NACE — našeptávač nad číselníkem ČINNOSTI (backend `GET /settings/nace-codes`
+// vrací jen kódy platné k dnešku). Důvod: ARES eviduje klasifikaci ještě podle
+// NACE rev. 2, jenže číselník EPO se k 1. 1. 2026 překlopil na rev. 2.1 a starým
+// kódům nastavil konec platnosti — prefill z ARES tak často přinese kód, který
+// portál odmítne propustnou chybou 30, a tady si uživatel najde nástupce.
+const naceItems = ref<NaceCode[]>([])
+const naceLoading = ref(false)
+// Kód zadaný ručně mimo číselník — nabízí se jako poslední volba, viz searchNace().
+const naceTyped = ref<string | null>(null)
+// Stav vybraného kódu: po načtení ze serveru (`cz_nace_resolved`), po výběru
+// z našeptávače (vždy platný) nebo po ručním zadání kódu mimo číselník.
+const naceResolved = ref<NaceResolved | null>(null)
+
+type NaceOption = { value: string; label: string; secondary?: string }
+const naceOptions = computed<NaceOption[]>(() => {
+  const opts: NaceOption[] = naceItems.value.map(c => ({ value: c.code, label: `${c.display} · ${c.name}` }))
+  if (naceTyped.value !== null) {
+    opts.push({ value: naceTyped.value, label: naceTyped.value, secondary: t('settings.cz_nace_use_as_typed') })
+  }
+  return opts
+})
+const naceSelected = computed(() => {
+  const code = ((supplier.value as any)?.cz_nace_code ?? '').toString()
+  if (!code) return null
+  const r = naceResolved.value
+  return { value: code, label: r && r.code === code && r.name ? `${r.display} · ${r.name}` : code }
+})
+
+async function searchNace(q: string) {
+  naceLoading.value = true
+  try {
+    const items = await settingsApi.searchNaceCodes(q, 25)
+    // Kód mimo snapshot číselníku musí jít zadat i tak — snapshot může zestárnout
+    // a backend takový kód uloží (jen upozorní na propustnou chybu 30). Bez téhle
+    // volby by se uživatel dostal do situace „platný kód nejde vybrat".
+    const digits = q.replace(/\D/g, '').slice(0, 6)
+    naceItems.value = items
+    naceTyped.value = digits.length >= 4 && !items.some(i => i.code === digits) ? digits : null
+  } catch {
+    naceItems.value = []
+    naceTyped.value = null
+  } finally {
+    naceLoading.value = false
+  }
+}
+
+function pickNace(code: string | null) {
+  const s = supplier.value as any
+  if (!s) return
+  s.cz_nace_code = code
+  const hit = code !== null ? naceItems.value.find(i => i.code === code) : undefined
+  // Našeptávač nabízí jen platné kódy; u ručně zadaného ověří stav až backend
+  // při uložení a vrátí ho v `cz_nace_resolved`.
+  naceResolved.value = code === null
+    ? null
+    : hit
+      ? { code, display: hit.display, name: hit.name, status: 'active', valid_to: null }
+      : { code, display: code, name: null, status: 'unknown', valid_to: null }
+}
+
 // Kopie odchozích e-mailů dodavateli (migrace 0102) — UI stav 'inherit' znamená
 // „klíč v self_copy chybí" = živý fallback na cfg flagy (vzor číslování faktur).
 // Explicitní volba klíč zapíše; zpět na 'inherit' ho smaže. Prázdný objekt → null.
@@ -165,7 +251,9 @@ async function load() {
   loading.value = true
   try {
     supplier.value = await settingsApi.getSupplier()
-    // První render preview hned po loadu supplier
+    // Stav uloženého CZ-NACE proti číselníku dopočítává backend — díky tomu je
+    // expirovaný kód vidět hned při načtení, ne až po uložení nebo z náhledu přiznání.
+    naceResolved.value = supplier.value.cz_nace_resolved ?? null
     bumpPreview()
   } finally { loading.value = false }
   loadSampleStatus()
@@ -260,6 +348,7 @@ async function saveSupplier() {
       invoice_number_period: supplier.value.invoice_number_period,
       email_branding_enabled: supplier.value.email_branding_enabled,
       email_accent_color: supplier.value.email_accent_color,
+      branding_profiles_enabled: supplier.value.branding_profiles_enabled,
       // Tax settings (EPO výkazy DPH/KH)
       taxpayer_type: (supplier.value as any).taxpayer_type ?? null,
       vat_period: (supplier.value as any).vat_period ?? null,
@@ -272,7 +361,6 @@ async function saveSupplier() {
       financial_office_code: (supplier.value as any).financial_office_code ?? null,
       workplace_code: (supplier.value as any).workplace_code ?? null,
       cz_nace_code: (supplier.value as any).cz_nace_code ?? null,
-      data_box_type: (supplier.value as any).data_box_type ?? null,
       data_box_id: (supplier.value as any).data_box_id ?? null,
       sest_jmeno: (supplier.value as any).sest_jmeno ?? null,
       sest_prijmeni: (supplier.value as any).sest_prijmeni ?? null,
@@ -287,6 +375,12 @@ async function saveSupplier() {
       opr_postaveni: (supplier.value as any).opr_postaveni ?? null,
     })
     syncSupplierStore(supplier.value)
+    // CZ-NACE: server vrací uloženou kanonickou podobu + stav proti číselníku
+    // (`cz_nace_resolved` kreslíme pod polem) a u expirovaného/neznámého kódu
+    // i hotovou hlášku `cz_nace_warning`. Uložení to neblokuje.
+    naceResolved.value = supplier.value.cz_nace_resolved ?? null
+    const naceWarning = supplier.value.cz_nace_warning ?? ''
+    if (naceWarning) toast.warning(naceWarning)
     toast.success(t('common.saved'))
     bumpPreview()
   } catch (e: any) {
@@ -294,11 +388,13 @@ async function saveSupplier() {
   }
 }
 
-// === Email branding ===========================================================
 const previewLocale = ref<'cs' | 'en'>('cs')
-const previewHtml = ref<string>('')
+const previewHtml = ref('')
+const logoFileInput = ref<HTMLInputElement | null>(null)
+const logoUploading = ref(false)
+
 async function bumpPreview() {
-  if (!supplier.value) return
+  if (!supplier.value || supplier.value.branding_profiles_enabled) return
   try {
     previewHtml.value = await settingsApi.emailPreviewHtml(previewLocale.value)
   } catch (e: any) {
@@ -306,9 +402,6 @@ async function bumpPreview() {
   }
 }
 
-// Uloží jen branding pole (email_branding_enabled + email_accent_color),
-// nešahá na zbytek supplier formuláře. Logo se ukládá samo při uploadu.
-// silent=true: žádný success toast (auto-save z watcheru — bylo by chatty).
 async function saveBranding(silent = false) {
   if (!supplier.value) return
   if (!/^#[0-9A-Fa-f]{6}$/.test(supplier.value.email_accent_color || '')) {
@@ -321,73 +414,47 @@ async function saveBranding(silent = false) {
       email_accent_color: supplier.value.email_accent_color,
       pdf_logo_show_name: supplier.value.pdf_logo_show_name,
     })
-    // Merge response do reactive supplier (zachová local-only fields jako has_email_logo)
     supplier.value = { ...supplier.value, ...updated }
     syncSupplierStore(supplier.value)
     if (!silent) toast.success(t('common.saved'))
     bumpPreview()
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
+  } catch (e: any) { toast.error(e?.response?.data?.error?.message || t('common.error')) }
 }
-// Auto-load při změně locale; první load triggernout po načtení supplier (v load()).
-watch(previewLocale, () => { if (supplier.value) bumpPreview() })
 
-// Auto-save toggle (okamžitě) a accent color (debounce 500 ms — color picker fires
-// kontinuálně při tažení). Po každém uloženém průchodu se obnoví preview iframe.
-// Guarded `watching` flag, ať initial load supplier z load() netriggerne save.
-let watching = false
-watch(supplier, () => {
-  // První zápis do supplier.value (initial load) by neměl spustit save.
-  // Aktivujeme watcher až v dalším tickeu po vyřešení load().
-  setTimeout(() => { watching = true }, 0)
-}, { once: true })
+watch(previewLocale, bumpPreview)
 
-let colorTimer: ReturnType<typeof setTimeout> | null = null
-watch(() => supplier.value?.email_branding_enabled, () => { if (watching) saveBranding(true) })
-watch(() => supplier.value?.pdf_logo_show_name, () => { if (watching) saveBranding(true) })
-watch(() => supplier.value?.email_accent_color, () => {
-  if (!watching) return
-  if (colorTimer) clearTimeout(colorTimer)
-  colorTimer = setTimeout(() => saveBranding(true), 500)
-})
-const logoFileInput = ref<HTMLInputElement | null>(null)
-const logoUploading = ref(false)
 function pickLogo() { logoFileInput.value?.click() }
 async function onLogoSelected(ev: Event) {
-  const f = (ev.target as HTMLInputElement).files?.[0]
-  if (!f || !supplier.value) return
-  if (f.size > 1_048_576) {
+  const file = (ev.target as HTMLInputElement).files?.[0]
+  if (!file || !supplier.value) return
+  if (file.size > 1_048_576) {
     toast.error(t('settings.branding_logo_too_large'))
     if (logoFileInput.value) logoFileInput.value.value = ''
     return
   }
   logoUploading.value = true
   try {
-    const result = await settingsApi.uploadEmailLogo(f)
+    const result = await settingsApi.uploadEmailLogo(file)
     supplier.value.logo_path = result.logo_path
     supplier.value.has_email_logo = true
     toast.success(t('settings.branding_logo_uploaded'))
     bumpPreview()
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  } finally {
+  } catch (e: any) { toast.error(e?.response?.data?.error?.message || t('common.error')) }
+  finally {
     logoUploading.value = false
     if (logoFileInput.value) logoFileInput.value.value = ''
   }
 }
+
 async function removeLogo() {
-  if (!supplier.value) return
-  if (!window.confirm(t('settings.branding_logo_remove_confirm'))) return
+  if (!supplier.value || !window.confirm(t('settings.branding_logo_remove_confirm'))) return
   try {
     await settingsApi.deleteEmailLogo()
     supplier.value.logo_path = null
     supplier.value.has_email_logo = false
     toast.success(t('settings.branding_logo_removed'))
     bumpPreview()
-  } catch (e: any) {
-    toast.error(e?.response?.data?.error?.message || t('common.error'))
-  }
+  } catch (e: any) { toast.error(e?.response?.data?.error?.message || t('common.error')) }
 }
 
 // Razítko / podpis (PDF faktury, vpravo dole)
@@ -642,6 +709,8 @@ async function removeSignature() {
 
       </section>
 
+      <BrandingProfilesSettings v-model:enabled="supplier.branding_profiles_enabled" @changed="load" />
+
       <!-- Číslování faktur — samostatný box -->
       <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.numbering_section') }}</h2>
@@ -720,8 +789,10 @@ async function removeSignature() {
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
-      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}</h2>
+      <section id="epo" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <!-- Červený badge jen při chybějících POVINNÝCH polích (blokují stažení XML);
+             chybějící doporučená hlásíme smířlivěji — podání s nimi projde. -->
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}<span v-if="epoMissingLocal.length > 0" class="ml-2 px-2 py-0.5 text-xs rounded-full bg-danger-50 text-danger-600 border border-danger-500/40 align-middle">{{ t('settings.epo_incomplete_badge') }}</span><span v-else-if="epoRecommendedLocal.length > 0" class="ml-2 px-2 py-0.5 text-xs rounded-full bg-warning-50 text-warning-700 border border-warning-500/40 align-middle">{{ t('settings.epo_recommended_badge') }}</span></h2>
         <div>
           <h3 class="sr-only">{{ t('settings.tax_section') }}</h3>
           <p class="text-xs text-neutral-500 mb-3">{{ t('settings.tax_hint') }}</p>
@@ -733,6 +804,7 @@ async function removeSignature() {
                 <option value="fo">{{ t('settings.taxpayer_fo') }}</option>
                 <option value="po">{{ t('settings.taxpayer_po') }}</option>
               </select>
+              <p v-if="epoFieldEmpty(supplier.taxpayer_type)" class="text-xs text-danger-500 mt-1">{{ t('settings.epo_required_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.vat_period') }}</label>
@@ -787,17 +859,41 @@ async function removeSignature() {
               <input v-model="supplier.financial_office_code" type="text" maxlength="8" placeholder="451"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.financial_office_hint') }}</p>
+              <p v-if="epoFieldEmpty(supplier.financial_office_code)" class="text-xs text-danger-500 mt-1">{{ t('settings.epo_required_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.workplace_code') }}</label>
-              <input v-model="supplier.workplace_code" type="text" maxlength="8"
+              <input v-model="supplier.workplace_code" type="text" maxlength="8" placeholder="2005"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.workplace_code_hint') }}</p>
+              <p v-if="epoFieldEmpty(supplier.workplace_code)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.cz_nace_code') }}</label>
-              <input v-model="supplier.cz_nace_code" type="text" maxlength="8" placeholder="62.01"
-                class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <!-- Našeptávač nad číselníkem ČINNOSTI: nabízí jen kódy platné k dnešku,
+                   ale ručně zadaný kód mimo snapshot jde vybrat taky (viz searchNace). -->
+              <SearchableSelect
+                :model-value="supplier.cz_nace_code ?? null"
+                remote
+                :loading="naceLoading"
+                :options="naceOptions"
+                :selected-option="naceSelected"
+                :placeholder="t('settings.cz_nace_placeholder')"
+                :no-results-label="t('settings.cz_nace_no_results')"
+                :loading-label="t('common.loading') + '…'"
+                @search="searchNace"
+                @update:model-value="pickNace"
+              />
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.cz_nace_hint') }}</p>
+              <!-- Stav kódu proti číselníku: expirovaný po přechodu na NACE rev. 2.1
+                   (chyba 30), nebo kód, který ve snapshotu není. Nic z toho neblokuje. -->
+              <p v-if="naceResolved?.status === 'expired'" class="text-xs text-warning-600 mt-1">
+                {{ t('settings.cz_nace_expired', { code: naceResolved.display, date: formatDate(naceResolved.valid_to) }) }}
+              </p>
+              <p v-else-if="naceResolved?.status === 'unknown'" class="text-xs text-warning-600 mt-1">
+                {{ t('settings.cz_nace_unknown', { code: naceResolved.code }) }}
+              </p>
+              <p v-else-if="epoFieldEmpty(supplier.cz_nace_code)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.data_box_id') }}</label>
@@ -824,16 +920,19 @@ async function removeSignature() {
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_jmeno') }}</label>
               <input v-model="supplier.opr_jmeno" type="text" maxlength="60"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_jmeno)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_prijmeni') }}</label>
               <input v-model="supplier.opr_prijmeni" type="text" maxlength="60"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_prijmeni)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_postaveni') }}</label>
               <input v-model="supplier.opr_postaveni" type="text" maxlength="60" placeholder="jednatel"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_postaveni)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
           </div>
 
@@ -905,8 +1004,7 @@ async function removeSignature() {
         </div>
       </section>
 
-      <!-- Email branding (M16) -->
-      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+      <section v-if="!supplier.branding_profiles_enabled" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-1">
           <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500">{{ t('settings.branding_title') }}</h2>
           <label class="inline-flex items-center gap-2 cursor-pointer">
@@ -917,30 +1015,21 @@ async function removeSignature() {
         <p class="text-xs text-neutral-500 mb-4">{{ t('settings.branding_subtitle') }}</p>
 
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <!-- Form -->
           <div class="space-y-4">
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.branding_logo') }}</label>
               <p class="text-xs text-neutral-500 mb-2">{{ t('settings.branding_logo_hint') }}</p>
               <div class="flex items-center gap-3">
-                <button
-                  @click="pickLogo" type="button"
-                  :disabled="logoUploading || !supplier.email_branding_enabled"
-                  class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                <button type="button" :disabled="logoUploading || !supplier.email_branding_enabled"
+                  class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50 disabled:opacity-50" @click="pickLogo">
                   {{ logoUploading ? t('common.loading') : (supplier.has_email_logo ? t('settings.branding_logo_replace') : t('settings.branding_logo_upload')) }}
                 </button>
-                <button
-                  v-if="supplier.has_email_logo" @click="removeLogo" type="button"
-                  class="cursor-pointer text-sm text-danger-600 hover:text-danger-700">
-                  {{ t('common.remove') }}
-                </button>
-                <input ref="logoFileInput" @change="onLogoSelected" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" />
+                <button v-if="supplier.has_email_logo" type="button" class="text-sm text-danger-600" @click="removeLogo">{{ t('common.remove') }}</button>
+                <input ref="logoFileInput" type="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" class="hidden" @change="onLogoSelected" />
               </div>
               <label class="inline-flex items-center gap-2 mt-3 cursor-pointer">
-                <input
-                  v-model="supplier.pdf_logo_show_name" type="checkbox"
-                  :disabled="!supplier.email_branding_enabled || !supplier.has_email_logo"
-                  class="h-4 w-4 accent-primary-600 disabled:opacity-50" />
+                <input v-model="supplier.pdf_logo_show_name" type="checkbox"
+                  :disabled="!supplier.email_branding_enabled || !supplier.has_email_logo" class="h-4 w-4 accent-primary-600 disabled:opacity-50" />
                 <span class="text-sm text-neutral-700">{{ t('settings.branding_logo_show_name') }}</span>
               </label>
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.branding_logo_show_name_hint') }}</p>
@@ -969,48 +1058,24 @@ async function removeSignature() {
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('settings.branding_accent_color') }}</label>
               <p class="text-xs text-neutral-500 mb-2">{{ t('settings.branding_accent_color_hint') }}</p>
               <div class="flex items-center gap-3">
-                <input
-                  v-model="supplier.email_accent_color" type="color"
-                  :disabled="!supplier.email_branding_enabled"
+                <input v-model="supplier.email_accent_color" type="color" :disabled="!supplier.email_branding_enabled"
                   class="h-10 w-14 cursor-pointer rounded border border-neutral-300 disabled:opacity-50" />
-                <input
-                  v-model="supplier.email_accent_color" type="text" placeholder="#3B2D83" pattern="^#[0-9A-Fa-f]{6}$"
-                  :disabled="!supplier.email_branding_enabled"
-                  class="h-10 w-32 px-3 border border-neutral-300 rounded-md text-sm font-mono disabled:opacity-50" />
-                <button
-                  @click="supplier.email_accent_color = '#3B2D83'" type="button"
-                  :disabled="!supplier.email_branding_enabled"
-                  class="cursor-pointer text-xs text-neutral-500 hover:text-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                  {{ t('settings.branding_accent_reset') }}
-                </button>
+                <input v-model="supplier.email_accent_color" type="text" placeholder="#3B2D83" pattern="^#[0-9A-Fa-f]{6}$"
+                  :disabled="!supplier.email_branding_enabled" class="h-10 w-32 px-3 border border-neutral-300 rounded-md text-sm font-mono disabled:opacity-50" />
+                <button type="button" :disabled="!supplier.email_branding_enabled" class="text-xs text-neutral-500 disabled:opacity-50"
+                  @click="supplier.email_accent_color = '#3B2D83'">{{ t('settings.branding_accent_reset') }}</button>
               </div>
             </div>
-
-            <p class="text-xs text-neutral-500">
-              {{ t('settings.branding_save_hint') }}
-            </p>
-
-            <div class="pt-2">
-              <button @click="() => saveBranding(false)" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
-                {{ t('settings.branding_save') }}
-              </button>
-            </div>
+            <button class="px-4 h-10 bg-primary-600 text-white text-sm font-medium rounded-md" @click="saveBranding(false)">{{ t('settings.branding_save') }}</button>
           </div>
 
-          <!-- Preview -->
           <div>
             <div class="flex items-center justify-between mb-2">
-              <label class="block text-sm font-medium text-neutral-700">{{ t('settings.branding_preview') }}</label>
-              <div class="flex items-center gap-1 text-xs">
-                <button @click="previewLocale = 'cs'" type="button"
-                  :class="previewLocale === 'cs' ? 'text-primary-600 font-semibold' : 'text-neutral-500 hover:text-neutral-700'"
-                  class="cursor-pointer px-2">CS</button>
-                <span class="text-neutral-300">|</span>
-                <button @click="previewLocale = 'en'" type="button"
-                  :class="previewLocale === 'en' ? 'text-primary-600 font-semibold' : 'text-neutral-500 hover:text-neutral-700'"
-                  class="cursor-pointer px-2">EN</button>
-                <button @click="bumpPreview" type="button"
-                  class="cursor-pointer ml-2 px-2 text-neutral-500 hover:text-neutral-700" :title="t('common.refresh')">↻</button>
+              <label class="text-sm font-medium text-neutral-700">{{ t('settings.branding_preview') }}</label>
+              <div class="flex items-center gap-2 text-xs">
+                <button :class="previewLocale === 'cs' ? 'font-semibold text-primary-600' : 'text-neutral-500'" @click="previewLocale = 'cs'">CS</button>
+                <button :class="previewLocale === 'en' ? 'font-semibold text-primary-600' : 'text-neutral-500'" @click="previewLocale = 'en'">EN</button>
+                <button class="text-neutral-500" :title="t('common.refresh')" @click="bumpPreview">↻</button>
               </div>
             </div>
             <iframe :srcdoc="previewHtml" sandbox="allow-same-origin" class="w-full h-[420px] border border-neutral-200 rounded-md bg-neutral-50" />

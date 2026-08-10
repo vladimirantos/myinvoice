@@ -39,11 +39,24 @@ final class KontrolniHlaseniBuilder
         private readonly TaxConstantsRepository $taxConstants,
     ) {}
 
+    /** Povolené formy podání KH (EPO XSD, § 101e–101f): B řádné, O opravné, N následné, E následné/opravné. */
+    public const FORMS = ['B', 'O', 'N', 'E'];
+    /** Formy, u kterých EPO vyžaduje datum zjištění důvodů (d_zjist) — následná podání. */
+    public const FORMS_REQUIRING_DZJIST = ['N', 'E'];
+
     /**
+     * @param string $form khdph_forma — viz FORMS; u N/E je $dZjist povinné
+     * @param string|null $dZjist datum zjištění důvodů pro podání (DD.MM.YYYY)
      * @return array{xml: string, summary: array<string,mixed>, warnings: list<string>}
      */
-    public function build(int $supplierId, int $year, int $month, string $period = 'monthly'): array
+    public function build(int $supplierId, int $year, int $month, string $period = 'monthly', string $form = 'B', ?string $dZjist = null): array
     {
+        if (!in_array($form, self::FORMS, true)) {
+            throw new \InvalidArgumentException("Neplatná forma hlášení '{$form}' (povolené: " . implode(', ', self::FORMS) . ').');
+        }
+        if (in_array($form, self::FORMS_REQUIRING_DZJIST, true) && ($dZjist === null || $dZjist === '')) {
+            throw new \InvalidArgumentException('Následné kontrolní hlášení vyžaduje datum zjištění důvodů (d_zjist).');
+        }
         $supplier = $this->loadSupplier($supplierId);
         $warnings = $this->validateSupplier($supplier, $period);
 
@@ -63,8 +76,28 @@ final class KontrolniHlaseniBuilder
         $end = (new \DateTimeImmutable(sprintf('%04d-%02d-01', $year, $endMonth)))->modify('last day of this month')->format('Y-m-d');
 
         // Všechny sekce z jedné projekce kanonických řádků (VatLedgerService).
-        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3]
+        ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3,
+         'missing_rates' => $missingRates, 'estimated_codes' => $estimatedCodes]
             = $this->collectSections($supplierId, $start, $end);
+        // Zahraniční RC bez explicitní klasifikace — fallback odhadl SLUŽBU (24e/24).
+        // Jde-li o zboží, patří plnění na jiný řádek přiznání (23 → ř. 3, 25 → ř. 7)
+        // → uživatel musí kód zvolit ručně; proto adresný warning per doklad.
+        foreach ($estimatedCodes as $e) {
+            $warnings[] = sprintf(
+                '%s (%s, %s): klasifikace odhadnuta — kód %s (%s). %s',
+                $e['doc'], $e['vendor'], $e['country'], $e['code'],
+                $e['code'] === '24e' ? 'služba z EU, ř. 5' : 'služba ze 3. země, ř. 12',
+                $e['code'] === '24e'
+                    ? 'U pořízení zboží z EU zvol ručně kód 23.'
+                    : 'U dovozu zboží ze 3. země zvol ručně kód 25.',
+            );
+        }
+        // #238: doklady v cizí měně bez kurzu — akce je při stažení doplní z ČNB.
+        if ($missingRates !== []) {
+            $warnings[] = 'Chybí kurz u dokladů v cizí měně: '
+                . implode(', ', VatLedgerService::missingExchangeRateLabels($missingRates))
+                . '. Při stažení XML se doplní z ČNB.';
+        }
         $a1 = $this->filterReverseChargeRowsWithDic($a1, 'A.1', $warnings);
         $b1 = $this->filterReverseChargeRowsWithDic($b1, 'B.1', $warnings);
         $a4 = $this->filterKhAttributeConflicts($a4, 'A.4', $warnings);
@@ -94,7 +127,13 @@ final class KontrolniHlaseniBuilder
         }
         $vetaD->setAttribute('rok', (string) $year);
         $vetaD->setAttribute('d_poddp', date('d.m.Y')); // datum podání (dnes)
-        $vetaD->setAttribute('khdph_forma', 'B'); // B = řádné podání
+        // B řádné / O opravné (§ 101f/1) / N následné (§ 101f/2) / E následné-opravné.
+        $vetaD->setAttribute('khdph_forma', $form);
+        // Datum zjištění důvodů pro podání následného KH — EPO ho u N/E vyžaduje
+        // (alternativou v XSD je č.j. výzvy, tu negenerujeme). U O je volitelné.
+        if ($dZjist !== null && $dZjist !== '') {
+            $vetaD->setAttribute('d_zjist', $dZjist);
+        }
         $dphkh->appendChild($vetaD);
 
         // VetaP — identifikace plátce (sdíleno s DPHDP3 přes EpoSupplierBlockBuilder)
@@ -273,7 +312,11 @@ final class KontrolniHlaseniBuilder
         $deadlineMonth = $endMonth + 1;
         $deadlineYear = $year;
         if ($deadlineMonth > 12) { $deadlineMonth -= 12; $deadlineYear++; }
-        $deadline = sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth);
+        // § 33/4 daňového řádu: sobota/neděle/svátek → nejbližší následující pracovní den
+        // (25.07.2026 = sobota → 27.07.2026; bez posunu UI chybně hlásilo „po termínu").
+        $deadline = CzechWorkingDays::shiftToWorkingDay(
+            new \DateTimeImmutable(sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth))
+        )->format('Y-m-d');
 
         return [
             'xml'      => $dom->saveXML() ?: '',
@@ -288,9 +331,11 @@ final class KontrolniHlaseniBuilder
                 'b1_count'            => count($b1),
                 'b2_count'            => count($b2),
                 'b3_count_aggregated' => $b3['count'],
+                'form'                => $form,
                 'submission_deadline' => $deadline,
             ],
             'warnings' => $warnings,
+            'missing_rates' => $missingRates,
         ];
     }
 
@@ -318,8 +363,28 @@ final class KontrolniHlaseniBuilder
         $bucket = $this->taxConstants->vatBucketThreshold($periodYear);
 
         // Agregace kanonických řádků per (zdroj, faktura).
+        $ledgerRows = $this->ledger->rows($supplierId, $start, $end, includeDrafts: false);
+        // Daňová pojistka (issue #238): non-CZK doklad bez kurzu by se do KH dostal
+        // s náhradním kurzem 1.0 (cizí měna jako CZK). NEházíme chybu — vrátíme doklady
+        // bez kurzu, akce je při stažení doplní z ČNB (náhled jen varuje).
+        $missingRates = VatLedgerService::missingExchangeRateRows($ledgerRows);
+        // Doklady s jen ODHADNUTÝM kódem (zahraniční RC bez klasifikace) — per doklad
+        // jednou, pro adresné warningy v preview (zboží vs. služba nelze z dat poznat).
+        $estimatedCodes = [];
+        foreach ($ledgerRows as $r) {
+            if (!empty($r['code_estimated']) && $r['code'] !== null) {
+                $doc = (string) ($r['vendor_invoice_number'] ?? $r['doc_number'] ?? ('#' . $r['invoice_id']));
+                $estimatedCodes[$r['source'] . ':' . $r['invoice_id']] = [
+                    'doc'     => $doc,
+                    'vendor'  => (string) ($r['counterparty_name'] ?? ''),
+                    'country' => (string) ($r['country_iso2'] ?? ''),
+                    'code'    => (string) $r['code'],
+                ];
+            }
+        }
+        $estimatedCodes = array_values($estimatedCodes);
         $inv = [];
-        foreach ($this->ledger->rows($supplierId, $start, $end, includeDrafts: false) as $r) {
+        foreach ($ledgerRows as $r) {
             $key = $r['source'] . ':' . $r['invoice_id'];
             if (!isset($inv[$key])) {
                 $inv[$key] = [
@@ -460,7 +525,8 @@ final class KontrolniHlaseniBuilder
             }
         }
 
-        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3];
+        return ['a1' => $a1, 'a2' => $a2, 'a4' => $a4, 'a5' => $a5, 'b1' => $b1, 'b2' => $b2, 'b3' => $b3,
+                'missing_rates' => $missingRates, 'estimated_codes' => $estimatedCodes];
     }
 
     /** @return list<string> warnings */
@@ -489,7 +555,7 @@ final class KontrolniHlaseniBuilder
                     COALESCE(c.iso2, 'CZ') AS country_iso2,
                     s.ic, s.dic, s.is_vat_payer, s.is_identified,
                     s.taxpayer_type, s.vat_period, s.financial_office_code,
-                    s.workplace_code, s.data_box_type, s.data_box_id,
+                    s.workplace_code, s.data_box_id,
                     s.email, s.phone, s.cz_nace_code,
                     s.street_number_pop, s.street_number_orient,
                     s.opr_jmeno, s.opr_prijmeni, s.opr_postaveni,
@@ -591,14 +657,22 @@ final class KontrolniHlaseniBuilder
      * u řady států obsahuje písmena (IE 1234567X, AT U12345678, NL 123456789B01, …).
      * XSD vyžaduje formát BEZ kódu členského státu — odstraníme prefix země, mezery a
      * oddělovače, zachováme alfanumerickou kmenovou část.
+     *
+     * Strháváme JEN prefix odpovídající kódu země — buď ISO 3166 (country_iso2), nebo
+     * VIES/DPH kód (u Řecka se liší: ISO "GR" vs VIES "EL", takže akceptujeme obojí).
+     * NEstrháváme libovolná 2 písmena — některá DIČ mají alfanumerickou vnitrostátní
+     * část (FR: „FRAB123456789" → „AB123456789", ne „123456789"). Issue #238.
      */
     public static function cleanEuVatId(?string $vatId, ?string $countryIso2): string
     {
         if (!$vatId) return '';
         $s = preg_replace('/[^A-Z0-9]/', '', strtoupper(trim($vatId))) ?? '';
-        $country = self::khCountryCode($countryIso2);
-        if ($country !== '' && str_starts_with($s, $country)) {
-            $s = substr($s, strlen($country));
+        $iso  = strtoupper(trim((string) $countryIso2)); // ISO 3166 (GR)
+        $vies = self::khCountryCode($countryIso2);        // VIES/DPH kód (EL pro Řecko)
+        foreach ([$vies, $iso] as $prefix) {
+            if ($prefix !== '' && str_starts_with($s, $prefix)) {
+                return substr($s, strlen($prefix));
+            }
         }
         return $s;
     }

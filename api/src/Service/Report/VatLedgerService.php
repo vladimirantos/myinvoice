@@ -41,8 +41,8 @@ use MyInvoice\Repository\TaxConstantsRepository;
  *   document_kind:?string, status:string, is_draft:bool, tax_date:?string, issue_date:?string,
  *   counterparty_name:string, counterparty_dic:?string, country_iso2:?string,
  *   code:?string, dphdp3_line:?string, dphdp3_line_secondary:?string, kh_section:?string,
- *   is_reverse_charge:bool, vat_deduction_partial:bool, vat_rate:float, base_czk:float, vat_czk:float,
- *   total_with_vat_czk:float, is_fixed_asset:bool, exchange_rate:float
+ *   is_reverse_charge:bool, code_estimated:bool, vat_deduction_partial:bool, vat_rate:float, base_czk:float, vat_czk:float,
+ *   total_with_vat_czk:float, is_fixed_asset:bool, exchange_rate:float, exchange_rate_missing:bool
  * }
  */
 final class VatLedgerService
@@ -120,7 +120,16 @@ final class VatLedgerService
             SELECT i.id AS invoice_id, i.varsymbol AS doc_number, i.varsymbol AS vendor_invoice_number,
                    i.invoice_type AS document_kind, i.status,
                    COALESCE(i.tax_date, i.issue_date) AS tax_date, i.issue_date,
-                   COALESCE(i.exchange_rate, 1) AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
+                   -- RAW kurz (bez COALESCE ...,1) — normalize() rozliší chybějící kurz
+                   -- od CZK a nastaví příznak exchange_rate_missing (issue #238).
+                   i.exchange_rate AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
+                   -- Prodejní strana se ZÁMĚRNĚ nenormalizuje: vydaný dobropis vzniká
+                   -- přes CancelInvoiceAction se zápornými položkami a validateItem brání
+                   -- dvojí negaci, takže kladně uložený dobropis je tu jen teoretická
+                   -- možnost — vynucený ale není (InvoiceAmountPolicy ho z kontrol
+                   -- pozitivity jen vyjímá). TODO: až bude ekvivalent soft warningu
+                   -- `credit_note_positive_total` i pro vydané doklady, zvážit stejnou
+                   -- -ABS() normalizaci jako u přijatých (fetchPurchases).
                    i.total_with_vat AS inv_total, i.reverse_charge AS rc_flag,
                    c.company_name AS counterparty_name, c.dic AS counterparty_dic,
                    co.iso2 AS country_iso2, COALESCE(co.is_eu, 0) AS country_is_eu,
@@ -185,8 +194,32 @@ final class VatLedgerService
             SELECT pi.id AS invoice_id, pi.varsymbol AS doc_number, pi.vendor_invoice_number,
                    pi.document_kind, pi.status,
                    COALESCE(pi.tax_date, pi.issue_date) AS tax_date, pi.issue_date,
-                   COALESCE(pi.exchange_rate, 1) AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
-                   pi.total_with_vat AS inv_total, pi.reverse_charge AS rc_flag,
+                   -- RAW kurz (bez COALESCE ...,1) — viz fetchSales / normalize() (issue #238).
+                   pi.exchange_rate AS exchange_rate, COALESCE(cur.code, 'CZK') AS currency,
+                   -- Přijatý dobropis (document_kind='credit_note') snižuje odpočet → do DPH
+                   -- evidence VŽDY záporně přes -ABS(). V DB totiž žijí OBĚ konvence: ruční
+                   -- pořízení/AI import ukládá záporně (qty −1, jako CancelInvoiceAction),
+                   -- ale část importů kladně (jen soft warning credit_note_positive_total,
+                   -- reálný případ PF2602004). Prosté ×(−1) by správně uložený záporný
+                   -- dobropis dvojitě negovalo a odpočet ZVÝŠILO.
+                   --
+                   -- LIMITACE: -ABS() se aplikuje na KAŽDOU položku dokladu (níže i na
+                   -- base/vat), takže u smíšeného opravného dokladu — třeba vrácení zboží
+                   -- jedním řádkem a kladný storno poplatek druhým — se vykáže záporně
+                   -- i ten kladný řádek. Rozlišit to dnes nejde: `document_kind` zná jen
+                   -- credit_note, vrubopis (opravný doklad se zvýšením) jako typ
+                   -- neexistuje, takže znaménko položky nemá proti čemu ověřit. Doklad
+                   -- s položkami obou znamének proto hlásíme warningem při uložení
+                   -- z editoru nebo přes API (`credit_note_mixed_sign_items`
+                   -- v PurchaseInvoiceValidation). Importní cesty warnings()
+                   -- nevolají — u nich se smíšenost typicky ani nedochová
+                   -- (AiPdfExtractor znaménka dobropisu sjednocuje).
+                   --
+                   -- (Vydané dobropisy v `invoices` znaménko NEnormalizujeme —
+                   -- viz komentář ve fetchSales.)
+                   (CASE WHEN pi.document_kind = 'credit_note'
+                         THEN -ABS(pi.total_with_vat) ELSE pi.total_with_vat END)
+                       AS inv_total, pi.reverse_charge AS rc_flag,
                    pi.vat_deduction, pi.vat_deduction_percent,
                    c.company_name AS counterparty_name, c.dic AS counterparty_dic,
                    co.iso2 AS country_iso2, COALESCE(co.is_eu, 0) AS country_is_eu,
@@ -194,16 +227,33 @@ final class VatLedgerService
                    COALESCE(
                        pii.vat_classification_code, pi.vat_classification_code,
                        CASE
+                           -- Zahraniční dodavatel + RC ≠ tuzemský § 92a (kód 5 → ř. 10, KH B.1)!
+                           -- Zrcadlí fallback prodejní strany: EU → 24e (služba § 9/1, ř. 5,
+                           -- KH A.2), 3. země → 24 (ř. 12, KH A.2). Zboží vs. službu z dat
+                           -- nerozlišíme — default služba + warning (code_estimated níže);
+                           -- pořízení zboží z EU = kód 23, dovoz ze 3. země = kód 25 ručně.
+                           WHEN pi.reverse_charge = 1 AND COALESCE(co.iso2, 'CZ') <> 'CZ'
+                                AND COALESCE(co.is_eu, 0) = 1 THEN '24e'
+                           WHEN pi.reverse_charge = 1 AND COALESCE(co.iso2, 'CZ') <> 'CZ' THEN '24'
                            WHEN pi.reverse_charge = 1 THEN '5'
                            WHEN pii.vat_rate_snapshot >= ?    THEN '40'
                            WHEN pii.vat_rate_snapshot > 0     THEN '41'
                            ELSE NULL
                        END
                    ) AS code,
+                   -- Příznak odhadnutého kódu (zahraniční RC bez explicitní klasifikace) —
+                   -- KH preview z něj staví warning, ať uživatel zboží překlasifikuje ručně.
+                   (CASE WHEN pii.vat_classification_code IS NULL AND pi.vat_classification_code IS NULL
+                              AND pi.reverse_charge = 1 AND COALESCE(co.iso2, 'CZ') <> 'CZ'
+                         THEN 1 ELSE 0 END) AS code_estimated,
                    pii.vat_rate_snapshot AS vat_rate,
                    pii.description AS description,
-                   COALESCE(pii.total_without_vat, 0) AS base,
-                   COALESCE(pii.total_vat, 0) AS vat
+                   (CASE WHEN pi.document_kind = 'credit_note'
+                         THEN -ABS(COALESCE(pii.total_without_vat, 0))
+                         ELSE COALESCE(pii.total_without_vat, 0) END) AS base,
+                   (CASE WHEN pi.document_kind = 'credit_note'
+                         THEN -ABS(COALESCE(pii.total_vat, 0))
+                         ELSE COALESCE(pii.total_vat, 0) END) AS vat
               FROM purchase_invoices pi
               JOIN clients c ON c.id = pi.vendor_id
          LEFT JOIN countries co ON co.id = c.country_id
@@ -301,7 +351,14 @@ final class VatLedgerService
      */
     private function normalize(array $r, string $source, array $map, float $bucket): array
     {
-        $rate = ($r['currency'] === 'CZK' || !$r['exchange_rate']) ? 1.0 : (float) $r['exchange_rate'];
+        // Kurz: CZK = 1.0. U cizí měny bez zafixovaného kurzu (NULL / ≤0) použijeme
+        // náhradní 1.0, aby ne-daňové konzumenty (CRM náklady, trendy) nespadly, ALE
+        // ZÁROVEŇ nastavíme příznak exchange_rate_missing — daňové XML výstupy (DPH/KH/SH)
+        // ho detekují a export zastaví (issue #238), protože 1.0 by tiše vykázalo EUR jako CZK.
+        $isCzk = $r['currency'] === 'CZK';
+        $rawRate = $r['exchange_rate'] === null ? null : (float) $r['exchange_rate'];
+        $exchangeRateMissing = !$isCzk && ($rawRate === null || $rawRate <= 0.0);
+        $rate = ($isCzk || $rawRate === null || $rawRate <= 0.0) ? 1.0 : $rawRate;
         $vatRate = (float) $r['vat_rate'];
         $baseRaw = (float) $r['base'];
         $vatRaw = (float) $r['vat'];
@@ -401,6 +458,9 @@ final class VatLedgerService
             'kh_regime_code'         => $clsf['kh_regime_code'] ?? null,
             'kh_bad_debt'            => $clsf['kh_bad_debt'] ?? null,
             'is_reverse_charge'     => $isRc,
+            // Kód nebyl na dokladu, jen odhadnut fallbackem pro zahraniční RC (24e/24) —
+            // KH preview generuje warning (zboží → 23/25 nutno zvolit ručně).
+            'code_estimated'        => !empty($r['code_estimated']),
             'vat_deduction_partial' => $isPartialDeduction,
             'vat_deduction_none'    => $isDeductionNone,
             'vat_rate'              => $vatRate,
@@ -412,6 +472,55 @@ final class VatLedgerService
             'total_with_vat_czk'    => round((float) $r['inv_total'] * $rate, 2),
             'is_fixed_asset'        => (bool) $r['is_fixed_asset'],
             'exchange_rate'         => $rate,
+            'exchange_rate_missing' => $exchangeRateMissing,
         ];
+    }
+
+    /**
+     * Daňová pojistka (issue #238): non-CZK řádek bez zafixovaného kurzu se ve
+     * VatLedgeru dopočítá náhradním kurzem 1.0 → cizoměnový základ by se tiše vykázal
+     * jako CZK. Vrací DISTINCT doklady (per zdroj+faktura) bez kurzu — akce si je při
+     * stažení doplní z ČNB (MissingExchangeRateFiller), náhled je jen vypíše jako varování.
+     *
+     * @param list<array<string,mixed>> $rows kanonické řádky z rows()
+     * @return list<array{invoice_id:int, source:string, currency:string, tax_date:?string, issue_date:?string, doc:string}>
+     */
+    public static function missingExchangeRateRows(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $r) {
+            if (empty($r['exchange_rate_missing'])) {
+                continue;
+            }
+            $key = (string) ($r['source'] ?? '') . ':' . (string) ($r['invoice_id'] ?? '0');
+            if (isset($out[$key])) {
+                continue;
+            }
+            $doc = (string) ($r['vendor_invoice_number'] ?? $r['doc_number'] ?? '')
+                ?: ('#' . (string) ($r['invoice_id'] ?? '?'));
+            $out[$key] = [
+                'invoice_id' => (int) ($r['invoice_id'] ?? 0),
+                'source'     => (string) ($r['source'] ?? ''),
+                'currency'   => (string) ($r['currency'] ?? ''),
+                'tax_date'   => isset($r['tax_date']) ? (string) $r['tax_date'] : null,
+                'issue_date' => isset($r['issue_date']) ? (string) $r['issue_date'] : null,
+                'doc'        => $doc,
+            ];
+        }
+        return array_values($out);
+    }
+
+    /**
+     * Popisné labely „doklad (měna)" z výstupu missingExchangeRateRows() — pro varování/chybu.
+     *
+     * @param list<array{doc:string, currency:string}> $missingRows
+     * @return list<string>
+     */
+    public static function missingExchangeRateLabels(array $missingRows): array
+    {
+        return array_values(array_map(
+            static fn (array $r): string => $r['doc'] . ' (' . $r['currency'] . ')',
+            $missingRows,
+        ));
     }
 }

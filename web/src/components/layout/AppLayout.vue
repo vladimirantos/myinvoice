@@ -9,6 +9,8 @@ import { settingsApi } from '@/api/settings'
 import SupplierSwitcher from './SupplierSwitcher.vue'
 import GlobalSearch from './GlobalSearch.vue'
 import ThemeToggle from './ThemeToggle.vue'
+import { useSessionSecurityStore } from '@/stores/sessionSecurity'
+import { useToast } from '@/composables/useToast'
 
 const { t, locale } = useI18n()
 function setLocale(l: 'cs' | 'en') {
@@ -20,17 +22,34 @@ const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
 const supplierStore = useSupplierStore()
+const sessionSecurity = useSessionSecurityStore()
+const toast = useToast()
 
 const mobileOpen = ref(false)
 const quickOpen = ref(false)
 const supportOpen = ref(false)
 const featureOpen = ref(false)
 const accountantSigningProfilesEnabled = ref(false)
+const logoutBusy = ref(false)
+const canLockSession = computed(() => sessionSecurity.state?.session_state === 'active'
+  && sessionSecurity.state.unlock_methods.includes('passkey'))
 let signingSettingsRequest = 0
 
 async function logout() {
-  await auth.logout()
-  router.push('/login')
+  if (logoutBusy.value) return
+  logoutBusy.value = true
+  try {
+    await auth.logout()
+    sessionSecurity.clear()
+    mobileOpen.value = false
+    await router.replace('/login')
+  } catch {
+    sessionSecurity.markLocked()
+    sessionSecurity.error = 'logout_failed'
+    toast.error(t('auth.logout_failed'))
+  } finally {
+    logoutBusy.value = false
+  }
 }
 
 async function loadAccountantSigningMenu() {
@@ -260,43 +279,53 @@ const flatNavItems = computed(() =>
   navSections.value.flatMap(s => s.items.map(it => ({ to: it.to, label: it.label, icon: it.icon, external: it.external })))
 )
 
-function isActive(to: string): boolean {
+/**
+ * „Pokrývá" URL (path + případná query) současnou route?
+ * Path musí sedět přesně nebo jako rodič skutečného child segmentu — prostý
+ * startsWith by matchoval i sourozence se stejným prefixem (např. /reports/dph
+ * by matchoval /reports/dph-book). Query klíče z URL musí všechny sedět
+ * s route.query; `queried` říká, že shoda vznikla i přes query (= specifičtější).
+ */
+function urlCoversRoute(url: string): { covers: boolean; queried: boolean } {
+  const [path, qs] = url.split('?', 2)
+  if (route.path !== path && !route.path.startsWith(path + '/')) return { covers: false, queried: false }
+  if (!qs) return { covers: true, queried: false }
+  for (const [k, v] of new URLSearchParams(qs)) {
+    if (String(route.query[k] ?? '') !== v) return { covers: false, queried: false }
+  }
+  return { covers: true, queried: true }
+}
+
+/**
+ * Kandidátní URL položky menu: `to` + případné `newTo`. Formulář „nový" patří
+ * vizuálně k témuž itemu — /clients/new?role=vendor jsou „Dodavatelé", ne
+ * „Klienti". Hodnoty query se u seznamu a formuláře liší záměrně (seznam
+ * filtruje přes role=vendors, formulář dostává default přes role=vendor,
+ * viz ClientList vs ClientForm), takže samotné `to` na match nestačí.
+ */
+function itemUrls(item: { to: string; newTo?: string }): string[] {
+  return item.newTo ? [item.to, item.newTo] : [item.to]
+}
+
+function isActive(item: NavItem): boolean {
+  const to = item.to
   if (to === '/') return route.path === '/'
   // /admin/suppliers je nyní dostupné jako první tab v Codebooks → aktivuje Codebooks položku
   if (to === '/admin/codebooks' && route.path.startsWith('/admin/suppliers')) return true
 
-  // Split `to` na path + query (pokud má query — např. /clients?role=vendors)
-  const [toPath, toQs] = to.split('?', 2)
+  const [toPath] = to.split('?', 2)
 
-  // Pokud současná route NEMÁ stejný path nebo child path — určitě není aktivní.
-  // Pozor: prostý startsWith by matchoval i sourozence se stejným prefixem
-  // (např. /reports/dph by matchoval /reports/dph-book), proto vyžadujeme
-  // přesnou shodu NEBO následující `/` (skutečný child segment).
-  if (route.path !== toPath && !route.path.startsWith(toPath + '/')) return false
+  const matches = itemUrls(item).map(urlCoversRoute)
+  if (!matches.some(m => m.covers)) return false
 
-  // Pokud item má query, musí se shodovat key-by-key s current route query.
-  if (toQs) {
-    const params = new URLSearchParams(toQs)
-    for (const [k, v] of params) {
-      if (String(route.query[k] ?? '') !== v) return false
-    }
-    return true
-  }
-
-  // Item NEMÁ query — pokud current route má query a existuje JINÝ item se stejným path
-  // a matchujícím query, ten druhý je aktivní, tento ne (např. /clients vs /clients?role=vendors).
-  if (Object.keys(route.query).length > 0) {
+  // Match bez query shody prohrává s itemem, který route pokrývá včetně query —
+  // ať už přes `to` (/clients vs /clients?role=vendors na seznamu dodavatelů),
+  // nebo přes `newTo` (/clients vs /clients/new?role=vendor na formuláři).
+  if (!matches.some(m => m.queried)) {
     for (const section of navSections.value) {
       for (const it of section.items) {
         if (it.to === to) continue
-        const [iPath, iQs] = it.to.split('?', 2)
-        if (iPath !== toPath || !iQs) continue
-        const iParams = new URLSearchParams(iQs)
-        let match = true
-        for (const [k, v] of iParams) {
-          if (String(route.query[k] ?? '') !== v) { match = false; break }
-        }
-        if (match) return false
+        if (itemUrls(it).some(u => urlCoversRoute(u).queried)) return false
       }
     }
   }
@@ -431,8 +460,14 @@ onMounted(async () => {
 
           <!-- Odhlásit (desktop) -->
           <button
-            @click="logout"
+            v-if="canLockSession"
+            @click="sessionSecurity.lock"
             class="cursor-pointer hidden sm:inline-flex px-3 h-8 items-center text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50"
+          >{{ t('session_lock.lock_now') }}</button>
+          <button
+            @click="logout"
+            :disabled="logoutBusy"
+            class="cursor-pointer hidden sm:inline-flex px-3 h-8 items-center text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
           >{{ t('nav.logout') }}</button>
 
           <!-- Hamburger (mobile, < lg) -->
@@ -524,7 +559,7 @@ onMounted(async () => {
                   exact-active-class=""
                   class="flex items-center gap-2.5 px-2.5 py-[7px] rounded-md text-sm transition-colors leading-tight"
                   :class="[
-                    isActive(item.to)
+                    isActive(item)
                       ? 'bg-primary-50 text-primary-700 font-medium'
                       : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100',
                     item.newTo && auth.canWrite ? 'pr-8' : '',
@@ -575,13 +610,20 @@ onMounted(async () => {
           <span v-else class="text-xs text-neutral-400">v{{ versionInfo.current }}</span>
         </div>
 
-        <!-- Mobile only: uživatel + jazyk + odhlásit (na dně sidebaru) -->
+        <!-- Mobile only: profil + ovládání relace (na dně sidebaru) -->
         <div class="lg:hidden border-t border-neutral-200 px-4 py-3 bg-neutral-50 space-y-3">
           <div class="flex items-center justify-between">
-            <div class="text-sm">
-              <div class="font-medium text-neutral-900">{{ auth.user?.name }}</div>
-              <div class="text-xs text-neutral-500">{{ auth.user?.email }} · {{ auth.user?.role }}</div>
-            </div>
+            <RouterLink
+              to="/profile/password"
+              @click="mobileOpen = false"
+              class="group min-w-0 flex-1 rounded-md -ml-2 px-2 py-1.5 text-sm hover:bg-surface"
+              :title="t('auth.profile_title')"
+            >
+              <div class="truncate font-medium text-neutral-900 group-hover:text-primary-700 group-hover:underline">
+                {{ auth.user?.name }}
+              </div>
+              <div class="truncate text-xs text-neutral-500">{{ auth.user?.email }} · {{ auth.user?.role }}</div>
+            </RouterLink>
             <a
               href="/manual" target="_blank" rel="noopener"
               class="inline-flex w-9 h-9 items-center justify-center rounded-md text-neutral-600 hover:bg-surface"
@@ -592,11 +634,9 @@ onMounted(async () => {
               </svg>
             </a>
           </div>
-          <!-- Přepínač motivu (System / Light / Dark) — mobilní varianta -->
-          <div class="flex">
+          <div class="flex items-center justify-between gap-2">
+            <!-- Přepínač motivu (System / Light / Dark) — mobilní varianta -->
             <ThemeToggle />
-          </div>
-          <div class="flex items-center justify-between gap-3">
             <div class="inline-flex items-center border border-neutral-200 bg-surface rounded-md overflow-hidden">
               <button
                 @click="setLocale('cs')" title="Čeština"
@@ -624,9 +664,17 @@ onMounted(async () => {
                 </svg>
               </button>
             </div>
+          </div>
+          <div class="grid gap-2" :class="canLockSession ? 'grid-cols-2' : 'grid-cols-1'">
+            <button
+              v-if="canLockSession"
+              @click="sessionSecurity.lock"
+              class="cursor-pointer w-full px-2 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface"
+            >{{ t('session_lock.lock_now') }}</button>
             <button
               @click="logout"
-              class="cursor-pointer px-4 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface"
+              :disabled="logoutBusy"
+              class="cursor-pointer w-full px-2 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-surface disabled:opacity-60"
             >{{ t('nav.logout') }}</button>
           </div>
         </div>
@@ -655,6 +703,13 @@ onMounted(async () => {
           <span aria-hidden="true">·</span>
           <button type="button" @click="featureOpen = true"
                   class="cursor-pointer text-primary-600 hover:text-primary-700 font-medium">{{ t('support.feature_link') }}</button>
+          <a href="https://myucto.cz/" target="_blank" rel="noopener"
+             class="ml-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary-600 text-white text-xs font-semibold shadow-sm hover:bg-primary-700 hover:shadow transition-colors">
+            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+            <span>{{ t('support.myucto_link') }}</span>
+          </a>
         </footer>
       </div>
     </div>
