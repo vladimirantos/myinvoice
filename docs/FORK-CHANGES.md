@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.44.1** (merge 2026-07-06; předtím v4.43.3, v4.42.0, v4.33.0, v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.53.2** (merge 2026-08-10; předtím v4.49.2, v4.44.1, v4.43.3, v4.42.0, v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -244,4 +244,68 @@ souborech ✓. **PHPUnit lokálně NEspustitelný** — repo vyžaduje `php ^8.5
 `php:8.5-apache`), lokální CLI je 8.4.23 a Docker daemon neběžel. Testy nechat doběhnout v CI.
 
 ---
-_Naposledy aktualizováno: 2026-07-22 (merge upstream v4.49.2)._
+## M. Merge v4.53.2 (2026-08-10) — 4 konflikty
+
+101 commitů (v4.49.2 → v4.53.2). Hlavní upstream přírůstky: passkeys / obecné MFA +
+zámek session + záložní kódy, **brandingové profily** (#229 — více vizuálních identit
+pod jedním dodavatelem, jen data), oprava DPH výkazů (dobropisy, zahraniční RC, forma
+podání, termíny § 33/4 DŘ), EPO CZ-NACE nad číselníkem ČINNOSTI, uživatelé omezení na
+vybrané firmy (`user_suppliers`) + role per firma, nativní auto-update z production
+bundlu, PWA instalace na plochu, systémové parsery e-mailových avíz (MONETA, RB, Air Bank),
+odemykání uzamčených dokladů, paušální daň 2026.
+
+**Náš design faktury: BEZ ZMĚNY.** Upstream se v tomhle rozsahu nedotkl
+`api/templates/invoice/*.twig` ani `styles/*.css` (ověřeno `git diff v4.49.2..v4.53.2
+--stat -- api/templates/invoice/ styles/` = prázdné) → do `spotted.twig` nebylo co přenášet.
+
+**Konflikt 1: `api/src/Service/Mail/SupplierLogoConverter.php` — SLOUČENO.**
+Upstream přidal `?int $brandingProfileId = null` (logo per branding profil, hash v názvu
+souboru `sup-{id}-brand-{profil}-{hash}.png`). Náš `$subdir` (razítko do
+`supplier-signatures`) posunut na 4. parametr → **volání razítka v `EmailBrandingAction`
+používá pojmenovaný argument** `process($tmpPath, $sid, subdir: 'supplier-signatures')`,
+aby upstream pozice `$brandingProfileId` zůstala volná. Return nese `$baseName` v cestě
+a drží oba klíče (`logo_path` BC alias + náš generický `path`). `delete()` upstream
+neměnil → náš `$subdir` param zůstal.
+
+**Konflikt 2: `api/src/Service/Pdf/InvoicePdfRenderer.php` — drženy naše seamy.**
+Upstream jen vytáhl vars do proměnné `$vars` (kosmetika) a přeformátoval `$css` ternár.
+Adoptovali jsme `$vars`, ale render jde dál přes `$this->resolvedTemplate()['twigName']`
+a CSS přes `resolvedTemplate()['cssPath']` (jinak by varianta `spotted` spadla zpět na
+`invoice.twig` / `invoice.css`). Auto-mergem přišel upstream `applyLiveBrandingProfile()`
+(živý branding profil u draftů) + `branding_profile_id` v cache-signatuře — ponecháno.
+
+**Konflikt 3: `api/src/Action/Settings/SettingsAction.php` — sloučeno obojí.**
+Vzat upstream `has_email_logo` přes `SafeLogoPath::resolve()` (robustnější než náš
+`is_file`) + jeho `branding_profiles_enabled` / `default_branding_profile_id`, doplněn
+náš `has_signature`.
+
+**Konflikt 4: `web/src/pages/admin/Update.vue` — držena naše extrakce.**
+Upstream mezitím **opravil** inline markdown renderer (víceřádkové odrážky: pokračovací
+řádky patří do téže `<li>`, ne do nového odstavce). Protože my ho máme vytažený v
+`web/src/utils/markdown.ts` (kvůli Poznámkám), **oprava byla ručně přenesena tam**
+(`flushLi` + buffer `li`), inline kopie z Update.vue zahozena. Import
+`useSessionAwarePolling` (nový upstream polling) ponechán vedle našeho importu.
+
+**Migrace `0140_notes.sql` → `0150_notes.sql`** (`git mv`; upstream max je `0149`).
+Idempotentní (`CREATE TABLE IF NOT EXISTS`) → re-run po přejmenování je bezpečný.
+Pozor: upstream sám má nově duplicitní čísla (2× `0140`, 2× `0141`, 2× `0145`) — migrátor
+trackuje podle plného názvu, takže to nevadí. Naše `0113_mark_all_invoices_paid.sql`
+zůstává **nepřečíslovaná** (není idempotentní — viz sekce H).
+
+**Infra + fork bloky beze změny:** `release.yml`, `.gitignore`, `.dockerignore` = 0 změn;
+`docker-entrypoint.sh` jen mode 644 → 755 (upstream `0c905ff1`). Auto-mergem přežely
+fork bloky v `Routes.php` (Poznámky), `Settings.vue` / `settings.ts` (razítko),
+`AppLayout.vue` + `router/index.ts` + `i18n/{cs,en}.json` (menu Poznámky),
+`Config.php` + `Mailer.php` + `_layout.html.twig` (`MYINVOICE_INVOICE_TEMPLATE`,
+`MYINVOICE_BRAND_VARIANT`).
+
+**Nová PHP závislost:** `web-auth/webauthn-lib ^5.3` (passkeys) — instaluje se v Docker
+buildu, lokálně `composer install` nejde (`php ^8.5`).
+
+**Ověřeno lokálně:** `php -l` na všech změněných PHP souborech ✓, `pnpm install
+--frozen-lockfile` + `pnpm build` (vue-tsc --noEmit + vite build) ✓. **PHPUnit lokálně
+NEspustitelný** (`php ^8.5`, lokální CLI 8.4.23) → testy nechat doběhnout v CI.
+Web se buildí přes **pnpm** (corepack), ne npm.
+
+---
+_Naposledy aktualizováno: 2026-08-10 (merge upstream v4.53.2)._
