@@ -258,6 +258,9 @@ final class InvoicePdfRenderer
     {
         // Použij snapshots pokud jsou (issued+), jinak živá data
         $supplierData = $this->resolveSupplier($invoice);
+        if (($invoice['status'] ?? 'draft') === 'draft' || empty($invoice['supplier_snapshot'])) {
+            $supplierData = $this->applyLiveBrandingProfile($supplierData, $invoice);
+        }
         $clientData   = $this->resolveClient($invoice);
         $bankData     = $this->resolveBank($invoice);
 
@@ -307,7 +310,7 @@ final class InvoicePdfRenderer
             ?? $this->variantDefaultLogoPath();
         $signaturePath = $this->resolveSignaturePath($supplierData, (int) ($invoice['supplier_id'] ?? 0));
 
-        return $twig->render($this->resolvedTemplate()['twigName'], [
+        $vars = [
             'invoice'           => $invoice,
             'supplier'          => $supplierData,
             'client'            => $clientData,
@@ -342,7 +345,8 @@ final class InvoicePdfRenderer
             'logo_show_name'    => $logoPath !== null && !empty($supplierData['pdf_logo_show_name']),
             'signature_path'    => $signaturePath, // razítko vpravo dole (null = nevykreslit)
             'isdoc_attachment'  => $hasIsdocAttachment, // bool — badge gate
-        ]);
+        ];
+        return $twig->render($this->resolvedTemplate()['twigName'], $vars);
     }
 
     private function newMpdf(string $tmpDir): Mpdf
@@ -444,6 +448,25 @@ final class InvoicePdfRenderer
             'cache' => false,
             'strict_variables' => false,
         ]);
+    }
+
+    /** @param array<string,mixed> $supplier @param array<string,mixed> $invoice */
+    private function applyLiveBrandingProfile(array $supplier, array $invoice): array
+    {
+        if (empty($invoice['branding_profile_id'])) return $supplier;
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT bp.* FROM supplier s
+               JOIN branding_profiles bp ON bp.id = ?
+                                        AND bp.supplier_id = s.id AND bp.is_active = 1
+              WHERE s.id = ? AND s.branding_profiles_enabled = 1'
+        );
+        $stmt->execute([
+            (int) $invoice['branding_profile_id'],
+            (int) ($invoice['supplier_id'] ?? 0),
+        ]);
+        $profile = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($profile === false) return $supplier;
+        return \MyInvoice\Service\Branding\BrandingProfileOverlay::apply($supplier, $profile);
     }
 
     /**
@@ -727,6 +750,7 @@ final class InvoicePdfRenderer
                 (int) $invoice['client_id'],
                 (int) $invoice['currency_id'],
                 (int) ($invoice['supplier_id'] ?? 0),
+                isset($invoice['branding_profile_id']) ? (int) $invoice['branding_profile_id'] : null,
             );
         } catch (\Throwable) {
             // Pokud klient/dodavatel neexistuje (smazaný), zachovej původní snapshot.

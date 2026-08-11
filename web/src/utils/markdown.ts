@@ -12,6 +12,7 @@ export function renderMarkdown(md: string): string {
   const out: string[] = []
   let listType: 'ul' | 'ol' | null = null
   let para: string[] = []
+  let li: string[] | null = null
   let inFence = false
   let fenceBuf: string[] = []
 
@@ -21,7 +22,16 @@ export function renderMarkdown(md: string): string {
       para = []
     }
   }
+  // Odrážka se sbírá po řádcích: pokračovací řádky (zalomený text odstavce
+  // pod `- `) patří pořád do téže položky, ne do samostatného odstavce.
+  const flushLi = () => {
+    if (li) {
+      out.push('<li>' + inline(li.join(' ')) + '</li>')
+      li = null
+    }
+  }
   const closeList = () => {
+    flushLi()
     if (listType) {
       out.push(`</${listType}>`)
       listType = null
@@ -84,14 +94,20 @@ export function renderMarkdown(md: string): string {
     }
     if (/^[-*]\s+/.test(trim)) {
       flushPara()
+      flushLi()
       ensureList('ul')
-      out.push('<li>' + inline(trim.replace(/^[-*]\s+/, '')) + '</li>')
+      li = [trim.replace(/^[-*]\s+/, '')]
       continue
     }
     if (/^\d+\.\s+/.test(trim)) {
       flushPara()
+      flushLi()
       ensureList('ol')
-      out.push('<li>' + inline(trim.replace(/^\d+\.\s+/, '')) + '</li>')
+      li = [trim.replace(/^\d+\.\s+/, '')]
+      continue
+    }
+    if (li) {
+      li.push(trim)
       continue
     }
     closeList()

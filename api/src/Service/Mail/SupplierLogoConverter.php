@@ -46,7 +46,12 @@ final class SupplierLogoConverter
      * @return array{logo_path: string, abs_path: string, width: int, height: int}
      * @throws \RuntimeException Pro user-facing chyby (přepošleme jako HTTP 4xx)
      */
-    public function process(string $sourcePath, int $supplierId, string $subdir = 'supplier-logos'): array
+    public function process(
+        string $sourcePath,
+        int $supplierId,
+        ?int $brandingProfileId = null,
+        string $subdir = 'supplier-logos',
+    ): array
     {
         if (!is_file($sourcePath)) {
             throw new \RuntimeException('Source soubor nenalezen.');
@@ -62,7 +67,13 @@ final class SupplierLogoConverter
         $mime = $this->detectMime($sourcePath);
 
         $targetDir  = \MyInvoice\Infrastructure\Config\RuntimePaths::storage($subdir);
-        $targetPath = $targetDir . '/sup-' . $supplierId . '.png';
+        $baseName = 'sup-' . $supplierId;
+        if ($brandingProfileId !== null) {
+            if ($brandingProfileId <= 0) throw new \RuntimeException('Neplatný brandingový profil.');
+            $hash = substr(hash_file('sha256', $sourcePath), 0, 12);
+            $baseName .= '-brand-' . $brandingProfileId . '-' . $hash;
+        }
+        $targetPath = $targetDir . '/' . $baseName . '.png';
         if (!is_dir($targetDir)) {
             @mkdir($targetDir, 0755, true);
         }
@@ -73,7 +84,7 @@ final class SupplierLogoConverter
         // SVG: ulož originál vedle PNG (PDF přes mPDF preferuje vektor pro
         // crisp render při libovolné velikosti / zvětšení). Email naopak vždy
         // používá PNG, protože Outlook/Gmail SVG nepodporují.
-        $svgSidecar = $targetDir . '/sup-' . $supplierId . '.svg';
+        $svgSidecar = $targetDir . '/' . $baseName . '.svg';
         @unlink($svgSidecar); // čistka po předchozím uploadu
         // Cache bíle-podloženého PDF loga (issue #152) — zneplatni po re-uploadu.
         \MyInvoice\Service\Pdf\PdfLogoFlattener::cleanup($targetPath);
@@ -98,7 +109,7 @@ final class SupplierLogoConverter
             throw new \RuntimeException('Konverze loga selhala (output není validní obrázek).');
         }
 
-        $rel = 'storage/' . $subdir . '/sup-' . $supplierId . '.png';
+        $rel = 'storage/' . $subdir . '/' . $baseName . '.png';
         return [
             'logo_path' => $rel,   // BC alias
             'path'      => $rel,   // generický klíč (logo i razítko)

@@ -21,8 +21,11 @@ final class EpoSupplierBlockBuilder
      *
      * @param array<string,mixed> $supplier Načteno z `supplier` tabulky včetně
      *                                       cz_nace_code, opr_*, sest_*, street_number_*.
+     * @param bool $includeContact Emitovat `email`/`c_telef`? DPHDP3 a DPHKH1 je znají,
+     *                             DPHSHV (souhrnné hlášení) NE — tam by je EPO odmítlo
+     *                             (VetaP XSD ty atributy nemá). SH volá s `false`.
      */
-    public static function fillVetaP(DOMElement $vetaP, array $supplier): void
+    public static function fillVetaP(DOMElement $vetaP, array $supplier, bool $includeContact = true): void
     {
         // c_ufo (kód FÚ) je required. Fallback "451" (Praha 1) pokud chybí.
         $vetaP->setAttribute('c_ufo', (string) ($supplier['financial_office_code'] ?: '451'));
@@ -33,10 +36,9 @@ final class EpoSupplierBlockBuilder
         $dic = (string) ($supplier['dic'] ?? '');
         $vetaP->setAttribute('dic', preg_replace('/^CZ/i', '', $dic) ?? $dic);
         // typ_ds = TYP DAŇOVÉHO SUBJEKTU (F = fyzická, P = právnická osoba), NIKOLI typ
-        // datové schránky. Dřív se sem plnil sloupec `data_box_type` (OVM/PO/FO) — u s.r.o.
-        // s prázdnou datovkou vypadl fallback "F" a EPO podání spadlo na kontrole
-        // „U fyzické osoby musí být kmenová část DIČ tvořena RČ nebo vlastním číslem plátce".
-        // Jediný autoritativní zdroj je `taxpayer_type` (fo/po).
+        // datové schránky — ten se sem plnil dřív a shodil podání každé právnické
+        // osobě („U fyzické osoby musí být kmenová část DIČ tvořena RČ nebo vlastním
+        // číslem plátce"). Jediný autoritativní zdroj je `taxpayer_type` (fo/po).
         $isPravnickaOsoba = ($supplier['taxpayer_type'] ?? null) === 'po';
         $vetaP->setAttribute('typ_ds', $isPravnickaOsoba ? 'P' : 'F');
 
@@ -95,8 +97,10 @@ final class EpoSupplierBlockBuilder
             $vetaP->setAttribute('stat', $statName);
         }
 
-        if (!empty($supplier['email'])) $vetaP->setAttribute('email', (string) $supplier['email']);
-        if (!empty($supplier['phone'])) $vetaP->setAttribute('c_telef', self::normalizePhone((string) $supplier['phone']));
+        if ($includeContact) {
+            if (!empty($supplier['email'])) $vetaP->setAttribute('email', (string) $supplier['email']);
+            if (!empty($supplier['phone'])) $vetaP->setAttribute('c_telef', self::normalizePhone((string) $supplier['phone']));
+        }
 
         // Oprávněná osoba (POVINNÉ u PO — jednatel apod.)
         if (!empty($supplier['opr_jmeno']))     $vetaP->setAttribute('opr_jmeno', (string) $supplier['opr_jmeno']);
@@ -229,23 +233,41 @@ final class EpoSupplierBlockBuilder
     }
 
     /**
-     * Normalizace CZ-NACE / OKEČ hodnoty pro `c_okec`. Hodnoty z UI mohou být
-     * "62.02", "62020", "620200" apod. → strip non-digit znaků, ořež na max 6.
+     * Normalizace CZ-NACE / OKEČ hodnoty pro `c_okec` při BUILDU výkazu (BUG 7).
+     * Hodnoty z UI/ARES mohou být "73.11", "7311", "731100", ale i pouhý oddíl "74".
      *
-     * NEPADUJEME zprava nulami: CZ-NACE číselník EPO je proměnné šířky — většina
-     * položek je 5-místná (`62020`), jen pár odvětví má 6-místné podtřídy
-     * (`010111`). XSD `totalDigits=6` je MAXIMUM, ne fixní délka; skutečný výčet
-     * hodnot žije v externím číselníku MFČR
-     * (https://adisspr.mfcr.cz/pmd/dokumentace/ciselniky/). Pravostranné doplnění
-     * 5-místného kódu nulou ("62020" → "620200") vyrobí hodnotu mimo číselník
-     * a EPO podání odmítne ("hodnota musí být z číselníku"). Validitu proti
-     * číselníku zde NEKONTROLUJEME — uživatel zná svou klasifikaci.
+     * Deleguje na EpoOkecCodebook::normalize() — kanonizaci proti snapshotu
+     * číselníku ČINNOSTI (OKEC) z Daňového portálu. Zápis třídy/podtřídy dle
+     * ČSÚ se dohledá doplněním nul zprava (73.11 / 7311 → 731100), kanonické
+     * hodnoty číselníku vč. bez-nulových kódů sekcí 01–09 („14800") projdou
+     * beze změny. Kód mimo číselník se NEBLOKUJE (snapshot může zestárnout;
+     * EPO hlásí jen propustnou chybu 30) — expiraci/neznámý kód hlásí
+     * completeness check v EpoIdentityValidator jako warning.
+     *
+     * KRATŠÍ NEŽ 4 číslice → null = atribut se VYNECHÁ (c_okec je optional;
+     * oddíl z ARES v číselníku není a vyvolal by chybu 30 — chybějící kód
+     * hlásí EpoIdentityValidator jako warning).
      */
     public static function normalizeOkec(string $raw): ?string
     {
-        $digits = preg_replace('/\D/', '', $raw) ?? '';
-        if ($digits === '') return null;
-        if (strlen($digits) > 6) $digits = substr($digits, 0, 6);
-        return $digits;
+        $resolved = EpoOkecCodebook::normalize($raw);
+        return $resolved === null ? null : $resolved['code'];
+    }
+
+    /**
+     * Normalizace CZ-NACE při UKLÁDÁNÍ (Nastavení / ARES prefill) — BUG 7.
+     *
+     * Vrací:
+     *   - ''       pro prázdný vstup (pole se smaže — povolené, jen warning ve výkazech),
+     *   - kanonický kód číselníku pro platný vstup (viz normalizeOkec),
+     *   - null     pro NEPLATNÝ vstup (po stripu méně než 4 číslice, např. „74")
+     *              → volající NESMÍ uložit a vrací validační chybu.
+     */
+    public static function normalizeCzNaceInput(string $raw): ?string
+    {
+        if (trim($raw) === '') {
+            return '';
+        }
+        return self::normalizeOkec($raw);
     }
 }
