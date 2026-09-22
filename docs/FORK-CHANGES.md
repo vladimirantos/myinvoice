@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.53.2** (merge 2026-08-10; předtím v4.49.2, v4.44.1, v4.43.3, v4.42.0, v4.33.0, v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.58.0** (merge 2026-09-22; předtím v4.53.2, v4.49.2, v4.44.1, v4.43.3, v4.42.0, v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -308,4 +308,44 @@ NEspustitelný** (`php ^8.5`, lokální CLI 8.4.23) → testy nechat doběhnout 
 Web se buildí přes **pnpm** (corepack), ne npm.
 
 ---
-_Naposledy aktualizováno: 2026-08-10 (merge upstream v4.53.2)._
+## N. Merge v4.58.0 (2026-09-22) — bez konfliktů
+
+57 commitů (v4.53.2 → v4.58.0), čistý auto-merge. Hlavní upstream přírůstky: tlačítko
+přechodu na nástupce **MyÚčto** (stránka `admin/upgrade`, promo v patičce a v Aktualizacích,
+skripty `cmd/docker-upgrade-to-myucto.*`), opravy klasifikací DPH / kontrolního hlášení
+(A.2 jen pro EU DIČ, trans jako zaškrtávátko), parsery avíz (Fio nový formát, RB karetní),
+párování plateb dle VS, poznámka k ignorovaným pohybům, plánování pravidelné fakturace,
+splatnost / po splatnosti, TOTP auto-submit, Uložit v každé sekci nastavení, RBAC pro
+účetní, přílohy z Fakturoidu, **zaokrouhlení dokladu** (#258 — `amount_to_pay` je nově
+generovaný sloupec `total_with_vat + rounding - advance_paid_amount`, migrace `0152`).
+
+**Náš design faktury: layout beze změny, ručně přeneseno zaokrouhlení.** Upstream do
+`invoice.twig` přidal řádky „Celkem s DPH" + „Zaokrouhlení" (jen když `totals.rounding != 0`)
+a součet `with_vat + rounding` — auto-merge to do našeho layoutu vložil sám (řádky `subtotal`
+dědí náš styl). Do `spotted.twig` přeneseny tytéž dva řádky do `sp-totals`; černý box
+„K úhradě" bere `invoice.amount_to_pay`, který zaokrouhlení už obsahuje → částka seděla i bez
+změny, řádky jen vysvětlují rozdíl. `styles/*.css` ani `PdfBranding.php` upstream nesáhl.
+
+**Migrace `0150_notes.sql` → `0153_notes.sql`** (`git mv`; upstream přidal vlastní
+`0150_purchase_vat_classification_30_cleanup.sql`, jeho max je `0152`). Idempotentní
+(`CREATE TABLE IF NOT EXISTS`) → re-run je bezpečný. `0113_mark_all_invoices_paid.sql`
+zůstává **nepřečíslovaná** (sekce H).
+
+**Infra + fork bloky beze změny:** `release.yml`, `.gitignore`, `.dockerignore`,
+`docker-entrypoint.sh` = 0 změn. Auto-mergem přežely fork bloky v `Routes.php` (Poznámky),
+`SettingsAction` (`has_signature`), `SupplierLogoConverter` + `EmailBrandingAction`
+(`subdir:` razítka), `InvoicePdfRenderer` (`resolvedTemplate()`, `variantDefaultLogoPath()`,
+marginy 26/9), `Config.php` + `Mailer.php` (`MYINVOICE_INVOICE_TEMPLATE`,
+`MYINVOICE_BRAND_VARIANT`), `Settings.vue` / `settings.ts` (razítko), `router/index.ts`
+(Poznámky), `Update.vue` (import `utils/markdown.ts`; upstream tam jen přidal promo MyÚčto).
+
+**Ověřeno lokálně:** `php -l` na všech 81 změněných PHP souborech ✓, `pnpm install
+--frozen-lockfile` + `pnpm build` (vue-tsc --noEmit + vite build) ✓. `node --test web/tests`:
+65 pass / 4 fail — **stejné 4 padají i na čistém upstream `v4.58.0`** (lokální Node 22.14
+neumí importovat `.ts` bez strip-types + vite dev server v testu), tedy prostředí, ne merge.
+**PHPUnit lokálně NEspustitelný** (`php ^8.5`) → testy doběhnou v CI.
+
+**Nasazení:** rovnou do `master` bez PR (na výslovné přání), `release.yml` nasadí oba stacky.
+
+---
+_Naposledy aktualizováno: 2026-09-22 (merge upstream v4.58.0)._
