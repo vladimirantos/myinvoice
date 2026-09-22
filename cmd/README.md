@@ -194,7 +194,7 @@ a `cfg.docker.php` přeskočí). Po dokončení běží aplikace na
 
 ```bash
 cmd/docker-build.sh --no-cache    # po změnách v Dockerfile / composer.json / pnpm-lock.yaml
-cmd/docker-build.sh --pull        # pull nových verzí base images (php:8.5-apache, mariadb:11)
+cmd/docker-build.sh --pull        # pull nových verzí base images (php:8.5-apache, mariadb:11.8)
 ```
 
 ### One-click instalace z GHCR (bez local buildu)

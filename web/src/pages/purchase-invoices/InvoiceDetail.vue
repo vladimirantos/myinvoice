@@ -525,6 +525,18 @@ const purchaseActions = computed<ActionItem[]>(() => {
       </button>
     </div>
 
+    <!-- ═══ Info: poplatek orgánu veřejné moci → plnění mimo předmět daně (§ 5/4 ZDPH) ═══ -->
+    <div v-if="invoice._warnings?.includes('public_authority_fee_out_of_scope')"
+      class="p-3 bg-warning-50 border border-warning-500/40 rounded-md text-sm text-warning-700">
+      ⚠ {{ t('purchase_invoice.warning.public_authority_fee_out_of_scope') }}
+    </div>
+
+    <!-- ═══ Varování: doklad s daní bez klasifikace → tiše mimo přiznání i KH ═══ -->
+    <div v-if="invoice._warnings?.includes('missing_vat_classification')"
+      class="p-3 bg-warning-50 border border-warning-500/40 rounded-md text-sm text-warning-700">
+      ⚠ {{ t('purchase_invoice.warning.missing_vat_classification') }}
+    </div>
+
     <!-- ═══ Hlavička: varsymbol + status + akce ═══ -->
     <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3 md:gap-4">
       <h1 class="text-2xl font-semibold flex items-center gap-3 flex-wrap min-w-0">

@@ -229,6 +229,12 @@
         {% if b.vat > 0 %}<tr><td class="l">{{ t('DPH', 'VAT') }} {{ b.rate|number_format(b.rate == b.rate|round(0) ? 0 : 2, decimal_sep, thousand_sep) }}&nbsp;%</td><td class="r nowrap">{{ b.vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td></tr>{% endif %}
         {% endfor %}
         {% endif %}
+        {# Zaokrouhlení dokladu (import Fakturoid/iDoklad, #258): amount_to_pay ho už obsahuje, tady jen vysvětlit rozdíl. #}
+        {% set rounding = invoice.totals.rounding ?? 0 %}
+        {% if rounding != 0 %}
+        <tr><td class="l">{{ t('Celkem s DPH', 'Total incl. VAT') }}</td><td class="r nowrap">{{ invoice.totals.with_vat|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td></tr>
+        <tr><td class="l">{{ t('Zaokrouhlení', 'Rounding') }}</td><td class="r nowrap">{{ rounding|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td></tr>
+        {% endif %}
         {% if invoice.advance_paid_amount > 0 %}
         <tr><td class="l">{{ invoice.invoice_type == 'tax_document' ? t('Uhrazeno přijatou platbou', 'Settled by payment received') : t('Odečet zálohy', 'Advance deduction') }}</td><td class="r nowrap">−{{ invoice.advance_paid_amount|number_format(2, decimal_sep, thousand_sep) }} {{ invoice.currency }}</td></tr>
         {% endif %}

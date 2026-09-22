@@ -175,6 +175,7 @@ use MyInvoice\Action\Document\DocumentJobsAction;
 use MyInvoice\Action\System\HealthAction;
 use MyInvoice\Action\System\OpenApiAction;
 use MyInvoice\Action\System\VersionAction;
+use MyInvoice\Action\Admin\MyuctoUpgradeAction;
 use MyInvoice\Action\Admin\UpdateAction;
 use Slim\App;
 
@@ -197,6 +198,14 @@ final class Routes
         $app->post ('/api/admin/update/refresh', [UpdateAction::class, 'refresh']);
         $app->post ('/api/admin/update/trigger', [UpdateAction::class, 'trigger']);
         $app->post ('/api/admin/update/cancel',  [UpdateAction::class, 'cancel']);
+
+        // Admin — přechod na nástupce MyÚčto.cz. Vlastní endpointy, ne varianta
+        // /api/admin/update/*: jiný produkt, jiný dopad, jiný stav.
+        $app->get  ('/api/admin/myucto-upgrade/status',    [MyuctoUpgradeAction::class, 'status']);
+        $app->get  ('/api/admin/myucto-upgrade/preflight', [MyuctoUpgradeAction::class, 'preflight']);
+        $app->post ('/api/admin/myucto-upgrade/refresh',   [MyuctoUpgradeAction::class, 'refresh']);
+        $app->post ('/api/admin/myucto-upgrade/trigger',   [MyuctoUpgradeAction::class, 'trigger']);
+        $app->post ('/api/admin/myucto-upgrade/cancel',    [MyuctoUpgradeAction::class, 'cancel']);
 
         // Admin — správa ukázkových (sample) dat (issue #162); admin-only přes RoleMiddleware
         $app->get   ('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'status']);
@@ -438,6 +447,7 @@ final class Routes
         $app->post   ('/api/recurring/{id:[0-9]+}/pause',     [RecurringTemplateAction::class, 'pause']);
         $app->post   ('/api/recurring/{id:[0-9]+}/resume',    [RecurringTemplateAction::class, 'resume']);
         $app->post   ('/api/recurring/{id:[0-9]+}/run-now',   [RecurringTemplateAction::class, 'runNow']);
+        $app->post   ('/api/recurring/{id:[0-9]+}/reschedule', [RecurringTemplateAction::class, 'reschedule']);
 
         // Work reports — výkaz víceprací (M5)
         $app->get    ('/api/invoices/{id:[0-9]+}/work-report', GetWorkReportAction::class);
