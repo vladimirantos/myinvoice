@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { updateApi, type UpdateStatus, type UpdatePreflight } from '@/api/update'
@@ -188,6 +189,24 @@ function fmtDate(s?: string | null): string {
     </div>
 
     <div v-else-if="status" class="space-y-6">
+      <!-- Promo: přechod na nástupce MyÚčto -->
+      <RouterLink
+        to="/admin/upgrade"
+        class="block rounded-lg border border-primary-300 bg-primary-50/40 p-5 hover:bg-primary-50/70 transition-colors"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <h2 class="text-lg font-semibold text-neutral-900">{{ t('updates.myucto_promo_title') }}</h2>
+            <p class="text-sm text-neutral-700 mt-1.5">{{ t('updates.myucto_promo_text') }}</p>
+            <p class="text-xs text-neutral-600 mt-2">{{ t('updates.myucto_promo_free') }}</p>
+          </div>
+          <span class="shrink-0 inline-flex items-center gap-1.5 rounded-md bg-primary-600 px-3 py-1.5 text-sm font-semibold text-white">
+            <span>{{ t('updates.myucto_promo_cta') }}</span>
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+          </span>
+        </div>
+      </RouterLink>
+
       <!-- Stav: aktuální vs. poslední -->
       <section v-if="healthWarnings.length" class="rounded-lg border border-warning-300 bg-warning-50/40 p-5">
         <h2 class="text-lg font-semibold text-warning-900">{{ t('updates.warnings_title') }}</h2>

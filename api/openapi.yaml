@@ -421,7 +421,7 @@ paths:
           schema: { type: boolean }
         - in: query
           name: filter[overdue]
-          description: Pouze po splatnosti
+          description: Pouze po splatnosti. Výchozí hranice je před dnešním dnem v časové zóně aplikace; konfigurace invoices.overdue_includes_today zahrne také dnešní splatnost.
           schema: { type: boolean }
         - in: query
           name: page
@@ -1446,8 +1446,8 @@ paths:
                       properties:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
-                        source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        source: { type: string, enum: [contact, project, main_email, supplier] }
+                        usage: { type: [string, "null"], enum: [documents, reminders, approvals, null] }
                         label: { type: [string, "null"] }
         '404': { description: Faktura nenalezena }
 
@@ -1486,12 +1486,15 @@ paths:
                 bcc:
                   type: array
                   items: { type: string, format: email }
-                subject:
+                subject_override:
                   type: string
-                  description: Override předmětu emailu
-                body:
+                  description: Override předmětu emailu (jinak předmět ze šablony `invoice_send`)
+                note:
                   type: string
-                  description: Override těla (HTML); proměnné z šablony se nesubstituují
+                  maxLength: 5000
+                  description: |
+                    Volitelná poznámka do těla e-mailu (NE do PDF). Plain text;
+                    neprázdné řádky se vyrenderují jako odstavce. Delší text se ořízne na 5000 znaků.
       responses:
         '200':
           description: OK — email odeslán
@@ -1500,8 +1503,14 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean }
-                  recipients:
+                  sent_to:
+                    type: array
+                    description: Adresy v poli To, na které se skutečně odesílalo.
+                    items: { type: string, format: email }
+                  cc:
+                    type: array
+                    items: { type: string, format: email }
+                  bcc:
                     type: array
                     items: { type: string, format: email }
                   resolved_recipients:
@@ -1512,10 +1521,20 @@ paths:
                       properties:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
-                        source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        source: { type: string, enum: [contact, project, main_email, supplier] }
+                        usage: { type: [string, "null"], enum: [documents, reminders, approvals, null] }
                         label: { type: [string, "null"] }
-                  archived_pdf_id: { type: integer, format: int64 }
+                  sent_at:
+                    type: string
+                    description: "Čas odeslání ve formátu `YYYY-MM-DD HH:MM:SS` (čas serveru)."
+                  is_test:
+                    type: boolean
+                    description: Vždy `false` u tohoto endpointu (testovací odeslání má vlastní endpoint).
+        '400':
+          description: Žádný platný příjemce (`no_recipients`) nebo neplatná adresa (`invalid_email`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: Faktura není ve stavu pro odeslání (draft)
           content:
@@ -1792,28 +1811,81 @@ paths:
       tags: [InvoiceOps]
       summary: Storno vystavené faktury
       description: |
-        Vystavená faktura **nelze smazat** — storno vytvoří záporný protiklad
-        (`invoice_type = cancellation`) se stejnou částkou, který původní fakturu
-        účetně ruší. Číselná řada je zachovaná (číslo původní faktury nezmizí).
+        Vystavená faktura **nelze smazat**. Číselná řada je vždy zachovaná
+        (číslo původní faktury nezmizí). Povinný `mode` volí režim storna:
+
+        - `internal` — interní storno bez dokladu pro klienta. Vznikne protidoklad
+          `invoice_type = cancellation` (bez `varsymbol`, s nulovými částkami,
+          status `issued`), původní faktura dostane status `cancelled` a
+          `cancelled_at`. Odpověď je `200` s `cancellation_id` a stornovanou
+          původní fakturou.
+        - `credit_note` — vystaví se **draft** dobropisu (`invoice_type = credit_note`)
+          se zápornými položkami; uživatel ho musí zkontrolovat v editoru a
+          zavolat `/issue`. Původní faktura si status ponechá až do vystavení
+          dobropisu. Odpověď je `201` s `credit_note_id`.
+
+        Dobropis lze stornovat pouze v režimu `internal`. Stornovací doklad
+        (`cancellation`) stornovat nelze.
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required: [mode]
               properties:
+                mode:
+                  type: string
+                  enum: [internal, credit_note]
+                  description: Režim storna — interní storno vs. draft dobropisu.
                 reason:
                   type: string
-                  description: Důvod storna (audit + volitelně do PDF)
+                  description: Důvod storna (audit + poznámka nad položkami protidokladu)
       responses:
         '200':
-          description: OK
+          description: "OK — interní storno (`mode: internal`)"
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  original:     { $ref: '#/components/schemas/Invoice' }
-                  cancellation: { $ref: '#/components/schemas/Invoice' }
+                  cancellation_id:
+                    type: integer
+                    format: int64
+                    description: ID vytvořeného stornovacího dokladu (`invoice_type = cancellation`).
+                  invoice:
+                    allOf:
+                      - $ref: '#/components/schemas/Invoice'
+                    description: Původní faktura po stornu (status `cancelled`).
+        '201':
+          description: "Vytvořen draft dobropisu (`mode: credit_note`)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credit_note_id: { type: integer, format: int64 }
+                  edit_url:
+                    type: string
+                    description: Relativní odkaz do editoru draftu dobropisu.
+        '400':
+          description: "Chybí nebo neplatný `mode` (`invalid_mode`)"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Faktura nenalezena
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            Fakturu nelze stornovat — není vystavená/odeslaná/zaplacená (`invalid_state`),
+            jde o stornovací doklad (`invalid_type`), nebo je to dobropis
+            a `mode` není `internal` (`invalid_mode`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/invoices/{id}/clone:
     parameters:
@@ -2159,11 +2231,14 @@ paths:
         schema: { type: integer, format: int64 }
     post:
       tags: [Bank]
-      summary: Ručně přiřadí transakci k faktuře (a označí ji paid)
+      summary: Ručně přiřadí transakci k faktuře a zaeviduje úhradu
       description: |
         Použij když automatický matching nezachytil platbu (variabilní symbol
-        chybí nebo neodpovídá). Označí transakci jako `matched`, fakturu jako
-        `paid` s `paid_at = transaction.posted_at`.
+        chybí nebo neodpovídá). Zaeviduje platbu v měně faktury; plné pokrytí
+        ji označí jako `paid` s `paid_at = transaction.posted_at`, nižší platba
+        zůstane částečnou úhradou. U CZK platby cizoměnové faktury odpovídající
+        celému zbytku se v platbě uloží celý zbytek v měně faktury; přesná CZK
+        částka zůstává na bankovní transakci.
       requestBody:
         required: true
         content:
@@ -2194,6 +2269,7 @@ paths:
     post:
       tags: [Bank]
       summary: Odpojí transakci od faktury (a vrátí fakturu z paid → issued)
+      description: Vrátí transakci do stavu unmatched a odstraní případnou poznámku k ignorování.
       responses:
         '200':
           description: OK
@@ -2208,9 +2284,26 @@ paths:
     post:
       tags: [Bank]
       summary: Označí transakci jako „ignorovat" (nesedí na žádnou fakturu)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note: { type: [string, "null"], maxLength: 1000, description: "Volitelná poznámka; prázdný text se uloží jako null." }
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ignored: { type: boolean, const: true }
+                  ignore_note: { type: [string, "null"], maxLength: 1000 }
+        '422':
+          description: Poznámka není text nebo přesahuje 1000 znaků.
 
   /api/v1/settings/supplier:
     parameters:
@@ -3264,6 +3357,7 @@ paths:
           schema: { type: boolean }
         - in: query
           name: filter[overdue]
+          description: Pouze po splatnosti. Výchozí hranice je před dnešním dnem v časové zóně aplikace; konfigurace invoices.overdue_includes_today zahrne také dnešní splatnost.
           schema: { type: boolean }
         - in: query
           name: q
@@ -5860,8 +5954,8 @@ components:
                   currency: { type: string }
                   unpaid_total:  { type: number, format: float }
                   unpaid_count:  { type: integer }
-                  overdue_total: { type: number, format: float }
-                  overdue_count: { type: integer }
+                  overdue_total: { type: number, format: float, description: "Dluh po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
+                  overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
 
     ClientInput:
       type: object
@@ -5955,7 +6049,7 @@ components:
         total_without_vat: { type: number, format: float }
         total_vat: { type: number, format: float }
         total_with_vat: { type: number, format: float }
-        rounding: { type: number, format: float, description: "Zaokrouhlení (CZK)" }
+        rounding: { type: number, format: float, description: "Zaokrouhlení dokladu v měně faktury (např. převzaté z importu Fakturoid/iDoklad). Do DPH se nepočítá, je součástí amount_to_pay." }
         advance_paid_amount: { type: number, format: float, description: "Záloha k odečtení (u faktury vystavované po proforme)" }
         amount_to_pay: { type: number, format: float, description: "total_with_vat + rounding − advance_paid_amount" }
         paid_total: { type: number, format: float, description: "Suma evidovaných plateb (invoice_payments, #89); zbývá k úhradě = amount_to_pay − paid_total" }
@@ -6206,8 +6300,8 @@ components:
                   currency: { type: string, example: CZK }
                   unpaid_total:  { type: number, format: float }
                   unpaid_count:  { type: integer }
-                  overdue_total: { type: number, format: float }
-                  overdue_count: { type: integer }
+                  overdue_total: { type: number, format: float, description: "Dluh po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
+                  overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
 
     ProjectInput:
       type: object
@@ -6474,7 +6568,7 @@ components:
                   this_year_project_count: { type: integer, description: "DISTINCT zakázky v této měně (letos)" }
                   prev_year_project_count: { type: integer }
             issued_count_ytd: { type: integer }
-            overdue_count: { type: integer }
+            overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
             overdue_per_currency:
               type: array
               items:
@@ -6489,6 +6583,7 @@ components:
               additionalProperties: { type: integer }
         overdue:
           type: array
+          description: Neuhrazené doklady po splatnosti v časové zóně aplikace; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false).
           items: { $ref: '#/components/schemas/Invoice' }
         unpaid_upcoming:
           type: array
@@ -6853,6 +6948,7 @@ components:
         counterparty_name: { type: [string, "null"] }
         description: { type: [string, "null"] }
         bank_ref: { type: [string, "null"], description: "Bankovní referenční ID transakce" }
+        ignore_note: { type: [string, "null"], maxLength: 1000, description: "Uživatelská poznámka k ignorování transakce." }
         match_status:
           type: string
           enum: [unmatched, auto_exact, auto_partial, manual, ignored]
@@ -7027,7 +7123,7 @@ components:
         id: { type: integer, format: int64 }
         invoice_id: { type: integer, format: int64 }
         paid_on: { type: string, format: date }
-        amount: { type: number, format: float, description: "Částka v měně faktury (> 0)" }
+        amount: { type: number, format: float, description: "Částka v měně faktury (> 0). U úplné FX úhrady jde o vypořádaný zbytek faktury; skutečnou částku a měnu bankovního pohybu nese navázaná BankTransaction." }
         currency: { type: string, example: CZK, description: "Denormalizovaný kód měny faktury v okamžiku platby" }
         variable_symbol: { type: [string, "null"] }
         bank_reference: { type: [string, "null"] }

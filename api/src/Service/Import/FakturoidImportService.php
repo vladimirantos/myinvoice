@@ -35,7 +35,8 @@ use Psr\Log\LoggerInterface;
  *
  * Platební stav (#121): doklady se zakládají jako draft, ale `status` z Fakturoidu
  * 'paid'/'cancelled' se promítne hned při importu (paid_at = `paid_on`) — viz
- * ImportedPaymentStateMapper. Ostatní stavy zůstávají draft (review flow).
+ * ImportedPaymentStateMapper. Ostatní vydané doklady se vystaví (issued) bez
+ * automatických upomínek (#250).
  */
 final class FakturoidImportService
 {
@@ -209,7 +210,13 @@ final class FakturoidImportService
             try {
                 $invoiceId = $this->createIssued($inv, $supplierId, $userId);
                 $this->db->pdo()->prepare('UPDATE invoices SET fakturoid_id = ? WHERE id = ?')->execute([$fakturoidId, $invoiceId]);
-                $this->invCalc->recompute($invoiceId);
+                $computed = $this->invCalc->recompute($invoiceId);
+                // #258: zaokrouhlení celkové částky z Fakturoidu, jinak by klientova
+                // zaokrouhlená úhrada vyšla jako přeplatek / částečná úhrada.
+                $rounding = ImportedInvoiceRounding::fromFakturoid($inv, (float) $computed['totals']['with_vat']);
+                if ($rounding !== 0.0) {
+                    $this->invoices->setRounding($invoiceId, $rounding);
+                }
                 if ($downloadAttachments) {
                     $this->archiveIssuedPdf($supplierId, $invoiceId, $fakturoidId, $inv);
                 }
@@ -301,8 +308,13 @@ final class FakturoidImportService
 
     /**
      * Aplikuje namapovaný platební stav na čerstvě importovanou vydanou fakturu
-     * (issue #121). Jen pro doklady ve stavu 'draft' (guard v WHERE) — existující
+     * (issue #121, #250). Jen pro doklady ve stavu 'draft' (guard v WHERE) — existující
      * doklady, které už uživatel zpracoval, se nemění.
+     *
+     * Otevřený doklad (state null: open/sent/overdue/uncollectible, vč. částečných
+     * úhrad) se importuje jako 'issued' (#250) — ve Fakturoidu už je vystavený.
+     * sent_at zůstává NULL a auto_send_reminders = 0, aby historické pohledávky
+     * nespustily hromadné upomínky (#121). Doklad bez čísla zůstává draft.
      *
      * Doklad opouští 'draft', proto dostává snapshoty (client/supplier/bank)
      * stejně jako file import (InvoiceImportService) a IssueInvoiceAction —
@@ -311,12 +323,10 @@ final class FakturoidImportService
      * záznamu — originál byl stornován už ve zdrojovém systému, interní storno
      * doklad by tu byl jen šum.
      *
-     * @param ?array{status:string, paid_at:?string} $state  null = ponechat draft
+     * @param ?array{status:string, paid_at:?string} $state  null = otevřený doklad
      */
     private function applyIssuedPaymentState(int $invoiceId, int $clientId, int $currencyId, int $supplierId, ?array $state, string $fallbackPaidAt, string $issueDate): void
     {
-        if ($state === null) return;
-
         $snapshots = $this->snapshots->build($clientId, $currencyId, $supplierId);
 
         $snapshotSql = 'client_snapshot = ?, supplier_snapshot = ?, bank_snapshot = ?';
@@ -326,7 +336,12 @@ final class FakturoidImportService
             $snapshots['bank'] !== null ? json_encode($snapshots['bank'], JSON_UNESCAPED_UNICODE) : null,
         ];
 
-        if ($state['status'] === 'paid') {
+        if ($state === null) {
+            $this->db->pdo()->prepare(
+                "UPDATE invoices SET status = 'issued', auto_send_reminders = 0, {$snapshotSql}
+                  WHERE id = ? AND status = 'draft' AND varsymbol IS NOT NULL AND varsymbol <> ''"
+            )->execute(array_merge($snapshotParams, [$invoiceId]));
+        } elseif ($state['status'] === 'paid') {
             $this->db->pdo()->prepare(
                 "UPDATE invoices SET status = 'paid', paid_at = ?, sent_at = ?, {$snapshotSql}
                   WHERE id = ? AND status = 'draft'"
@@ -414,17 +429,30 @@ final class FakturoidImportService
         $dueDate   = (string) ($e['due_on'] ?? $issueDate);
 
         $vatRates = $this->loadVatRateMap();
-        $defaultVatRateId = $this->matchVatRateId($vatRates, 21.0) ?? $this->matchVatRateId($vatRates, 0.0) ?? 0;
 
         $items = [];
         foreach (($e['lines'] ?? []) as $idx => $line) {
             $rate = (float) ($line['vat_rate'] ?? 0);
+            // Nenamapovanou sazbu doklad ODMÍTNE, nefallbackuje na tuzemských 21 %.
+            // Fallback tady dřív z německých 19 % udělal českou základní sazbu, takže se
+            // cizí daň dostala na ř. 40 + KH B.2 jako nárok na odpočet (audit VAT
+            // klasifikací, C-3a). Import doklad zaznamená jako chybný s touhle hláškou
+            // v logu úlohy a pokračuje dalšími — ostatní doklady tím netrpí.
+            $vatRateId = $this->matchVatRateId($vatRates, $rate);
+            if ($vatRateId === null) {
+                throw new \RuntimeException(sprintf(
+                    'Položka č. %d: sazba DPH %s %% není v číselníku — cizí sazbu nelze '
+                    . 'nahradit tuzemskou, doplňte ji do číselníku sazeb a import zopakujte.',
+                    $idx + 1,
+                    rtrim(rtrim(number_format($rate, 2, ',', ' '), '0'), ','),
+                ));
+            }
             $items[] = [
                 'description'            => (string) ($line['name'] ?? ''),
                 'quantity'               => (float) ($line['quantity'] ?? 1),
                 'unit'                   => (string) ($line['unit_name'] ?? 'ks'),
                 'unit_price_without_vat' => (float) ($line['unit_price'] ?? 0),
-                'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId,
+                'vat_rate_id'            => $vatRateId,
                 'order_index'            => $idx,
             ];
         }
@@ -607,15 +635,16 @@ final class FakturoidImportService
     }
 
     /**
-     * Stáhne přílohu výdaje (originální doklad od dodavatele) z Fakturoid `attachment`
-     * URL a uloží jako PDF přijaté faktury. Symetrické k iDokladu.
+     * Stáhne přílohu výdaje (originální doklad od dodavatele) z Fakturoid a uloží
+     * jako PDF přijaté faktury. Symetrické k iDokladu. Viz issue #261 —
+     * Fakturoid vrací přílohy v poli `attachments`, ne ve skalárním `attachment`.
      */
     private function archiveExpensePdf(int $supplierId, int $purchaseInvoiceId, array $exp): void
     {
-        $url = (string) ($exp['attachment'] ?? '');
-        if ($url === '') return; // výdaj bez přílohy
+        $attachment = FakturoidExpenseAttachment::resolve($exp);
+        if ($attachment === null) return; // výdaj bez přílohy
 
-        $pdf = $this->fakturoid->downloadAttachment($supplierId, $url);
+        $pdf = $this->fakturoid->downloadAttachment($supplierId, $attachment['download_url']);
         if ($pdf === null) return;
 
         $archiveRoot = (string) $this->config->get('purchase_invoice.archive_storage', '');
@@ -630,8 +659,7 @@ final class FakturoidImportService
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
         $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
-        $name = ((string) ($exp['number'] ?? 'expense')) . '.pdf';
-        $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $name);
+        $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $attachment['filename']);
     }
 
     private function loadBookmark(int $supplierId): ?string

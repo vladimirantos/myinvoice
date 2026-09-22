@@ -978,8 +978,12 @@ final class CrmAggregationService
      *   total: int
      * }
      */
-    public function actionItems(int $supplierId, ?int $userId = null, ?\DateTimeImmutable $now = null): array
-    {
+    public function actionItems(
+        int $supplierId,
+        ?int $userId = null,
+        ?\DateTimeImmutable $now = null,
+        ?string $userRole = null,
+    ): array {
         $items = [];
         $pdo = $this->db->pdo();
         $nowDt = $now ?? new \DateTimeImmutable();
@@ -987,6 +991,21 @@ final class CrmAggregationService
 
         // Load dismissals once
         $dismissals = $this->loadDismissals($supplierId, $userId);
+
+        // 0. Přechod na MyÚčto — nástupce MyInvoice od stejného autora.
+        // Záměrně první: je to nabídka, ne úkol, ale týká se celé instalace
+        // a ostatní položky se objevují a mizí podle dat, takže by se v nich
+        // ztratila. Jen pro admina — /admin/upgrade je adminOnly a komukoliv
+        // jinému by odkaz skončil na redirectu. Zavrhnutelná jako ostatní.
+        if ($userRole === 'admin' && !$this->isFullyDismissed($dismissals, 'myucto_upgrade')) {
+            $items[] = [
+                'type'     => 'myucto_upgrade',
+                'severity' => 'low',
+                'title'    => 'Přejděte zdarma na MyÚčto',
+                'hint'     => 'Nástupce MyInvoice od stejného autora — vše, co znáte, zdarma a s víc funkcemi',
+                'link'     => '/admin/upgrade',
+            ];
+        }
 
         // 1. Overdue vystavené faktury — pošli upomínku.
         // Stejná pohledávková sémantika jako cílový seznam /invoices?overdue=1
@@ -1445,7 +1464,8 @@ final class CrmAggregationService
     public function dismissActionItem(int $supplierId, int $userId, string $itemType, string $mode): void
     {
         $validTypes = ['overdue_invoices', 'bank_unmatched', 'recurring_due', 'overdue_payables',
-            'purchase_drafts', 'tax_deadline', 'kh_deadline', 'shv_deadline', 'churn_risk'];
+            'purchase_drafts', 'tax_deadline', 'kh_deadline', 'shv_deadline', 'churn_risk',
+            'myucto_upgrade'];
         $validModes = ['day', 'week', 'forever', 'historical'];
         if (!in_array($itemType, $validTypes, true)) {
             throw new \InvalidArgumentException("Invalid item_type: {$itemType}");

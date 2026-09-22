@@ -84,6 +84,7 @@ final class RoleMiddleware implements MiddlewareInterface
         '* #^/api/clients(/|$)#',
         '* #^/api/projects(/|$)#',
         '* #^/api/invoices(/|$)#',
+        '* #^/api/recurring(/|$)#',
         // Přijaté faktury — účetní smí plnou CRUD (vč. items, PDF, transition,
         // payment-qr, link-advance). Bez tohoto pravidla padaly všechny non-GET
         // na purchase-invoices do admin-only fallbacku (funkční mezera).
@@ -107,6 +108,21 @@ final class RoleMiddleware implements MiddlewareInterface
         // ZIP export + stav import jobu může i účetní (read)
         'GET #^/api/admin/invoices-zip$#',
         'GET #^/api/admin/imports/[0-9]+$#',
+        // Import dokladů = práce s daty, ne konfigurace — Action vrstva to tak deklaruje
+        // (ImportAction, StartIdoklad/FakturoidImportAction, AiExtractPdfAction,
+        // Cancel/DeleteImportJobAction = admin|accountant) a stejně to slibuje manuál
+        // (39.5 RBAC). Bez těchto pravidel účetnímu spadl každý běh importu do
+        // admin-only fallbacku dřív, než se Action guard vůbec dostal ke slovu.
+        // Credentials integrací (PUT/DELETE …/credentials) zůstávají admin-only —
+        // to je konfigurace systému, ne data.
+        'POST #^/api/admin/import$#',
+        'POST #^/api/admin/imports/(idoklad|fakturoid)/start$#',
+        'POST #^/api/admin/imports/ai-extract-pdf$#',
+        'POST #^/api/admin/imports/[0-9]+/cancel$#',
+        'DELETE #^/api/admin/imports/[0-9]+$#',
+        // Stav AI integrace (bez tajemství — configured/model/počet extrakcí) potřebuje
+        // účetní na stránce Import, aby věděl, zda se PDF bez ISDOC zpracuje přes AI.
+        'GET #^/api/admin/imports/anthropic/credentials$#',
     ];
 
     /**

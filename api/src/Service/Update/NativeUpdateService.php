@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Update;
 
 use MyInvoice\Bootstrap;
 use MyInvoice\Infrastructure\Config\Config;
+use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\PhpCliLocator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
@@ -13,8 +14,9 @@ use RuntimeException;
 use Throwable;
 
 /**
- * Nativní auto-update z production bundle (GitHub release asset
- * `myinvoice-X.Y.Z.tar.gz`).
+ * Nativní nasazení production bundle z GitHub releasu
+ * (`<produkt>-X.Y.Z.tar.gz`; který produkt a repozitář, určuje
+ * {@see ReleaseChannel} — aktualizace MyInvoice, nebo přechod na MyÚčto).
  *
  * Bundle je kompletní deployable strom — `api/vendor/`, `web/dist/`,
  * `manual/generated/` i `manual/manual.pdf` jsou představěné, takže host
@@ -47,10 +49,20 @@ use Throwable;
  */
 final class NativeUpdateService
 {
-    /** Kroky pipeline v pořadí — UI je zobrazuje jako progress. */
+    /**
+     * Kroky pipeline v pořadí — UI je zobrazuje jako progress.
+     *
+     * Přechod na jiný produkt ({@see ReleaseChannel::requiresDatabaseBackup})
+     * má navíc krok `db_backup`: u aktualizace se schéma posouvá o pár migrací
+     * a rollback znamená vrátit kód, kdežto tady se nad databází dojede celá
+     * sada migrací nástupce a zpátky už žádná cesta nevede. Dump proto není
+     * doporučení, ale součást pipeline — bez něj se neswapuje.
+     */
     public const STEPS = ['preflight', 'download', 'verify', 'extract', 'backup', 'swap', 'migrate', 'finish'];
 
-    private const RELEASE_BY_TAG_API = 'https://api.github.com/repos/radekhulan/myinvoice/releases/tags/v';
+    /** Krok navíc pro přechod mezi produkty; vkládá se hned za preflight. */
+    public const STEP_DB_BACKUP = 'db_backup';
+
 
     /**
      * Odkud smí bundle přijít. GitHub redirectuje asset download na svůj
@@ -87,6 +99,7 @@ final class NativeUpdateService
 
     private readonly string $rootDir;
     private readonly string $stateDir;
+    private readonly ReleaseChannel $channel;
 
     /** Relativní cesty už přepsané v aktuálním swapu — podklad pro rollback. */
     private array $swapped = [];
@@ -94,12 +107,32 @@ final class NativeUpdateService
     /** Odložené `.myinvoice-old` soubory, které zatím nešlo smazat (zamčené). */
     private array $parked = [];
 
-    public function __construct(?string $rootDir = null, ?string $stateDir = null)
-    {
+    public function __construct(
+        ?string $rootDir = null,
+        ?string $stateDir = null,
+        ?ReleaseChannel $channel = null,
+    ) {
+        $this->channel = $channel ?? ReleaseChannel::myinvoice();
         $this->rootDir = rtrim($rootDir ?? Bootstrap::rootDir(), '/\\');
         // Shodná logika jako VersionService::stateBaseDir() — flag/result/log
         // musí končit tam, kde je hledá VersionService.
         $this->stateDir = rtrim($stateDir ?? (Config::resolveDataDir() ?? $this->rootDir), '/\\');
+    }
+
+    /**
+     * Kroky pipeline pro tenhle kanál — UI i `progress()` počítají z nich.
+     *
+     * @return list<string>
+     */
+    public function steps(): array
+    {
+        if (!$this->channel->requiresDatabaseBackup) {
+            return self::STEPS;
+        }
+        $steps = self::STEPS;
+        array_splice($steps, 1, 0, [self::STEP_DB_BACKUP]);
+
+        return $steps;
     }
 
     // ---------- preflight -------------------------------------------------
@@ -108,12 +141,24 @@ final class NativeUpdateService
      * Ověří, že nativní update na `$target` má smysl zkoušet. Blockery update
      * neumožní, warnings jsou informativní.
      *
-     * @return array{ok:bool, supported:bool, blockers:list<string>, warnings:list<string>}
+     * Vedle nich vrací `checks` — jednotlivé kontroly VČETNĚ těch, které
+     * dopadly dobře. UI z nich staví checklist, protože „nic nebrání" není
+     * před nevratnou operací dost: člověk chce vidět, co se ověřilo a s jakou
+     * naměřenou hodnotou.
+     *
+     * @return array{
+     *     ok:bool,
+     *     supported:bool,
+     *     blockers:list<string>,
+     *     warnings:list<string>,
+     *     checks:list<array{id:string, label:string, status:string, actual:string, expected:string}>
+     * }
      */
     public function preflight(string $target): array
     {
         $blockers = [];
         $warnings = [];
+        $checks   = [];
 
         if (!self::isValidVersion($target)) {
             $blockers[] = 'Cílová verze „' . $target . '" není platný semver (X.Y.Z).';
@@ -125,26 +170,51 @@ final class NativeUpdateService
         if (!function_exists('curl_init') && !filter_var(ini_get('allow_url_fopen'), FILTER_VALIDATE_BOOLEAN)) {
             $blockers[] = 'Není dostupné ani cURL, ani allow_url_fopen — bundle nelze stáhnout.';
         }
-        if (PhpCliLocator::resolve() === null) {
+        $cli = PhpCliLocator::resolve();
+        $checks[] = $this->preflightCheck(
+            'php_cli',
+            'PHP CLI pro worker a migrace',
+            $cli !== null,
+            $cli ?? 'nenalezena (PHP_BINARY=' . PHP_BINARY . ')',
+            'spustitelná binárka',
+        );
+        if ($cli === null) {
             $blockers[] = 'Nenalezena PHP CLI binárka (PHP_BINARY=' . PHP_BINARY . ') — nelze spustit worker ani migrace.';
         }
 
+        $unwritable = [];
         foreach (['', 'api', 'web', 'manual'] as $sub) {
             $dir = $sub === '' ? $this->rootDir : $this->rootDir . '/' . $sub;
             if (!is_dir($dir)) {
                 continue;
             }
             if (!$this->isDirWritable($dir)) {
+                $unwritable[] = $sub === '' ? '(root instalace)' : $sub;
                 $blockers[] = 'Adresář ' . ($sub === '' ? '(root instalace)' : $sub) . ' není zapisovatelný pro uživatele webserveru.';
             }
         }
+        $checks[] = $this->preflightCheck(
+            'writable_paths',
+            'Práva zápisu do instalace',
+            $unwritable === [],
+            $unwritable === [] ? 'zapisovatelné' : 'nelze zapsat: ' . implode(', ', $unwritable),
+            'root, api, web, manual',
+        );
 
         if (!$this->canReplaceFiles()) {
             $blockers[] = 'Existující soubory nelze přepsat (rename/unlink selhal) — zkontroluj práva a zámky souborů.';
         }
 
         $free = @disk_free_space($this->stateDir);
-        if (is_float($free) && $free < self::MIN_FREE_BYTES) {
+        $freeOk = !is_float($free) || $free >= self::MIN_FREE_BYTES;
+        $checks[] = $this->preflightCheck(
+            'disk_space',
+            'Volné místo na disku',
+            $freeOk,
+            is_float($free) ? $this->humanBytes((int) $free) : 'nezjištěno',
+            '>= ' . $this->humanBytes(self::MIN_FREE_BYTES),
+        );
+        if (!$freeOk) {
             $blockers[] = 'Na disku je jen ' . $this->humanBytes((int) $free)
                 . ' volného místa; bundle + záloha potřebují aspoň ' . $this->humanBytes(self::MIN_FREE_BYTES) . '.';
         }
@@ -158,11 +228,37 @@ final class NativeUpdateService
                 . 'jinak poběží stará bytecode cache.';
         }
 
+        // Dosud se ověřovalo jen to, jestli update proběhne. Tohle ověřuje,
+        // jestli výsledek poběží — u přechodu na nástupce s vyššími nároky
+        // je to rozdíl mezi „nespustí se" a „skončí půl na půl".
+        $req = TargetRequirements::check($this->channel, $this->rootDir);
+        $blockers = array_merge($blockers, $req['blockers']);
+        $warnings = array_merge($warnings, $req['warnings']);
+
+        // Požadavky cíle napřed: to je to, co člověk před přechodem řeší.
+        // Prostředí updatu (práva, místo, CLI) je až za nimi.
+        $checks = array_merge($req['checks'], $checks);
+
         return [
             'ok'        => $blockers === [],
             'supported' => true,
             'blockers'  => $blockers,
             'warnings'  => $warnings,
+            'checks'    => $checks,
+        ];
+    }
+
+    /**
+     * @return array{id:string, label:string, status:string, actual:string, expected:string}
+     */
+    private function preflightCheck(string $id, string $label, bool $ok, string $actual, string $expected): array
+    {
+        return [
+            'id'       => $id,
+            'label'    => $label,
+            'status'   => $ok ? 'ok' : 'fail',
+            'actual'   => $actual,
+            'expected' => $expected,
         ];
     }
 
@@ -182,7 +278,7 @@ final class NativeUpdateService
         }
 
         $this->appendLog($log, str_repeat('=', 60));
-        $this->appendLog($log, 'MyInvoice.cz nativní update → v' . $target . ' (žádal ' . $requestedBy . ')');
+        $this->appendLog($log, $this->channel->productName . ' — nasazuji v' . $target . ' (žádal ' . $requestedBy . ')');
         $this->appendLog($log, 'root=' . $this->rootDir . ' state=' . $this->stateDir);
 
         $work = $this->stateDir . '/storage/updates/' . $target;
@@ -198,6 +294,11 @@ final class NativeUpdateService
             }
             $this->ensureDir($work);
 
+            if ($this->channel->requiresDatabaseBackup) {
+                $this->progress($target, self::STEP_DB_BACKUP, 'Zálohuji databázi…');
+                $this->backupDatabase($log);
+            }
+
             $this->progress($target, 'download', 'Stahuji production bundle…');
             [$bundlePath, $expectedSha] = $this->downloadBundle($target, $work, $log);
 
@@ -211,11 +312,24 @@ final class NativeUpdateService
             $backup = $work . '/backup';
             $this->ensureDir($backup);
 
+            // Od téhle chvíle je instalace nekonzistentní (půl staré, půl nové
+            // verze; schéma ještě neposunuté) a musí requestům odpovídat 503,
+            // ne fatálem z půlky autoloadu. Značka padá až po migracích.
+            MaintenanceMode::begin($this->stateDir, $this->channel->productName, $target);
+            $this->appendLog($log, 'Režim údržby zapnut — requesty dostanou 503 do konce migrací.');
+
             $this->progress($target, 'swap', 'Nasazuji nové soubory…');
             $swapped = $this->swap($stage, $backup, $target, $log);
 
             $this->progress($target, 'migrate', 'Spouštím databázové migrace…');
             $this->runMigrations($log);
+
+            if ($this->channel->isSuccessorHandover) {
+                $this->handoverToSuccessor($log);
+            }
+
+            MaintenanceMode::end($this->stateDir);
+            $this->appendLog($log, 'Režim údržby vypnut.');
 
             $this->progress($target, 'finish', 'Dokončuji…');
             $this->writeVersionFile($target, $stage, $log);
@@ -230,23 +344,28 @@ final class NativeUpdateService
             $this->appendLog($log, 'CHYBA: ' . $e->getMessage());
             $this->cleanupParked($log);
             return $this->finishFailed($target, $e->getMessage(), $log);
+        } finally {
+            // I update, který skončil chybou, musí instalaci vrátit do provozu.
+            // Bez tohohle by ji značka držela na 503 až do vlastní expirace,
+            // tedy i ve chvíli, kdy rollback vrátil funkční starou verzi.
+            MaintenanceMode::end($this->stateDir);
         }
     }
 
     // ---------- download / verify -----------------------------------------
 
     /**
-     * Najde v releasu podle tagu asset `myinvoice-X.Y.Z.tar.gz` + jeho `.sha256`,
+     * Najde v releasu podle tagu asset `<produkt>-X.Y.Z.tar.gz` + jeho `.sha256`,
      * stáhne oba.
      *
      * @return array{0:string, 1:string} cesta k bundlu, očekávaný sha256
      */
     private function downloadBundle(string $target, string $work, string $log): array
     {
-        $release = $this->httpGetJson(self::RELEASE_BY_TAG_API . $target);
+        $release = $this->httpGetJson($this->channel->releaseByTagApi() . $target);
         $assets  = is_array($release['assets'] ?? null) ? $release['assets'] : [];
 
-        $bundleName = 'myinvoice-' . $target . '.tar.gz';
+        $bundleName = $this->channel->bundleName($target);
         $bundleUrl  = null;
         $shaUrl     = null;
         $expectSize = null;
@@ -307,7 +426,7 @@ final class NativeUpdateService
 
     /**
      * Rozbalí bundle do čistého staging dir přes {@see TarGzExtractor}, který
-     * validuje každou cestu v archivu (prefix `myinvoice-X.Y.Z/`, žádné `..`,
+     * validuje každou cestu v archivu (prefix `<produkt>-X.Y.Z/`, žádné `..`,
      * absolutní cesty ani odkazy). Pak ověří, že strom vypadá jako kompletní
      * production bundle.
      *
@@ -319,7 +438,7 @@ final class NativeUpdateService
         $this->removeTree($stageRoot);
         $this->ensureDir($stageRoot);
 
-        $prefix = 'myinvoice-' . $target . '/';
+        $prefix = $this->channel->archivePrefix($target);
         $files  = (new TarGzExtractor())->extract($bundlePath, $stageRoot, $prefix);
         $this->appendLog($log, 'Rozbaleno ' . count($files) . ' souborů');
 
@@ -540,6 +659,45 @@ final class NativeUpdateService
     // ---------- migrace + finish -----------------------------------------
 
     /** Spustí `api/bin/migrate.php` samostatným CLI procesem — už novým kódem. */
+    /**
+     * Dump databáze před swapem — pojistka pro přechod na jiný produkt.
+     *
+     * Používá `api/bin/cron-backup.php`, tedy tentýž kód jako noční záloha:
+     * má vyřešenou detekci `mariadb-dump`/`mysqldump` (včetně Windows cest),
+     * cílový adresář i případné šifrování. Duplikovat tu logiku jen kvůli
+     * upgradu by znamenalo druhé místo, kde se to může rozejít.
+     *
+     * Selhání je fatální. Pustit nevratnou migraci schématu bez zálohy je
+     * horší než upgrade nespustit vůbec — instalace zůstane netknutá.
+     */
+    private function backupDatabase(string $log): void
+    {
+        $php = PhpCliLocator::resolve();
+        if ($php === null) {
+            throw new RuntimeException('Nenalezena PHP CLI binárka pro spuštění zálohy databáze.');
+        }
+        $script = $this->rootDir . '/api/bin/cron-backup.php';
+        if (!is_file($script)) {
+            throw new RuntimeException('Chybí ' . $script . ' — zálohu databáze nelze pořídit, '
+                . 'a bez ní přechod nespouštím. Zazálohuj ručně a použij ruční postup.');
+        }
+
+        $cmd = escapeshellarg($php) . ' ' . escapeshellarg($script) . ' 2>&1';
+        $this->appendLog($log, '$ ' . $cmd);
+
+        $out = [];
+        $rc  = 0;
+        @exec($cmd, $out, $rc);
+        foreach ($out as $line) {
+            $this->appendLog($log, '  ' . $line);
+        }
+        if ($rc !== 0) {
+            throw new RuntimeException('Záloha databáze selhala (exit ' . $rc . '). Přechod nespouštím — '
+                . 'instalace zůstává beze změny. Podrobnosti v logu ' . basename($log) . '.');
+        }
+        $this->appendLog($log, 'Záloha databáze hotova.');
+    }
+
     private function runMigrations(string $log): void
     {
         $php = PhpCliLocator::resolve();
@@ -567,6 +725,50 @@ final class NativeUpdateService
         $this->appendLog($log, 'Migrace OK');
     }
 
+    /**
+     * Doladění stavu po výměně produktu za nástupce.
+     *
+     * ÚČETNICTVÍ SE VYPÍNÁ. MyÚčto zavádí přepínač „Vést účetnictví" s
+     * defaultem zapnuto — což je správně pro firmu, která v MyÚčtu už účtuje,
+     * ale ne pro instalaci, která právě přišla z MyInvoice a účetnictví nikdy
+     * nevedla. Ta by po přechodu dostala plné účetní menu a k tomu režim
+     * „daňová evidence", tedy default sloupce `accounting_mode` — u s.r.o.
+     * rovnou špatně, protože ta vede podvojné účetnictví ze zákona.
+     *
+     * Nechat to na uživateli není totéž jako vypnout: režim účetnictví
+     * rozhoduje o tom, jak se doklady účtují, a MyÚčto ho po prvním zaúčtování
+     * nepřepíná zadarmo. Přechod proto nechá agendu skrytou a volbu (vést /
+     * nevést, a v jakém režimu) nechá na vědomém rozhodnutí — mzdy, sklad
+     * i OSS se chovají stejně, ty jsou vypnuté už z principu.
+     *
+     * Selhání nesmí shodit celý přechod: kód i schéma jsou v tuhle chvíli
+     * v pořádku a nasazená verze je platná. Zapíše se do logu a jde se dál.
+     */
+    private function handoverToSuccessor(string $log): void
+    {
+        try {
+            $pdo = (new Connection(Config::load($this->rootDir)))->pdo();
+
+            $hasColumn = $pdo->query(
+                "SHOW COLUMNS FROM supplier LIKE 'accounting_enabled'"
+            )->fetch();
+            if ($hasColumn === false) {
+                $this->appendLog($log, 'Předání nástupci: sloupec supplier.accounting_enabled neexistuje — přeskočeno.');
+                return;
+            }
+
+            $stmt = $pdo->prepare('UPDATE supplier SET accounting_enabled = 0 WHERE accounting_enabled = 1');
+            $stmt->execute();
+
+            $this->appendLog($log, 'Předání nástupci: účetnictví vypnuto u ' . $stmt->rowCount()
+                . ' firem — instalace přišla z MyInvoice.cz, kde se neúčtovalo. '
+                . 'Zapíná se v Nastavení → Licenční moduly spolu s volbou režimu.');
+        } catch (Throwable $e) {
+            $this->appendLog($log, 'VAROVÁNÍ: předání nástupci selhalo (' . $e->getMessage()
+                . '). Účetnictví zůstalo zapnuté — vypni ho v Nastavení → Licenční moduly.');
+        }
+    }
+
     /** Poslední krok — teprve teď se instalace prohlásí za novou verzi. */
     private function writeVersionFile(string $target, string $stage, string $log): void
     {
@@ -578,7 +780,7 @@ final class NativeUpdateService
     private function cleanupWork(string $work, string $log): void
     {
         $this->removeTree($work . '/stage');
-        foreach ((array) @glob($work . '/myinvoice-*.tar.gz') as $f) {
+        foreach ((array) @glob($work . '/' . $this->channel->bundleGlob()) as $f) {
             @unlink((string) $f);
         }
         $this->appendLog($log, 'Úklid: staging a tarball smazány, záloha zachována.');
@@ -611,7 +813,7 @@ final class NativeUpdateService
      */
     private function progress(string $target, string $step, string $message): void
     {
-        $flag = $this->stateDir . '/storage/upgrade-requested.json';
+        $flag = $this->channel->flagPath($this->stateDir);
         $payload = [];
         if (is_file($flag)) {
             $decoded = json_decode((string) @file_get_contents($flag), true);
@@ -620,8 +822,9 @@ final class NativeUpdateService
         $payload['mode']           = 'native';
         $payload['target_version'] = $target;
         $payload['step']           = $step;
-        $payload['step_index']     = (int) array_search($step, self::STEPS, true) + 1;
-        $payload['step_count']     = count(self::STEPS);
+        $steps = $this->steps();
+        $payload['step_index']     = (int) array_search($step, $steps, true) + 1;
+        $payload['step_count']     = count($steps);
         $payload['step_message']   = $message;
         $payload['heartbeat_at']   = date(\DateTimeInterface::ATOM);
 
@@ -664,11 +867,11 @@ final class NativeUpdateService
     /** @param array<string,mixed> $result */
     private function writeResult(array $result): array
     {
-        $path = $this->stateDir . '/storage/upgrade-result.json';
+        $path = $this->channel->resultPath($this->stateDir);
         $this->ensureDir(dirname($path));
         @file_put_contents($path, json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         // Flag musí zmizet, jinak UI zůstane na „upgrade probíhá".
-        @unlink($this->stateDir . '/storage/upgrade-requested.json');
+        @unlink($this->channel->flagPath($this->stateDir));
 
         return $result;
     }
@@ -930,7 +1133,7 @@ final class NativeUpdateService
 
     private function logPath(): string
     {
-        return $this->stateDir . '/storage/upgrade-' . gmdate('Ymd\THis\Z') . '.log';
+        return $this->stateDir . '/storage/' . $this->channel->statePrefix() . '-' . gmdate('Ymd\THis\Z') . '.log';
     }
 
     private function appendLog(string $path, string $line): void

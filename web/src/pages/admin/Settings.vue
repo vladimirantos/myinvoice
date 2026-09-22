@@ -707,6 +707,16 @@ async function removeSignature() {
           </div>
         </div>
 
+        <!-- Uložit je v KAŽDÉM boxu nad dodavatelem (dodavatel, číslování, EPO, Pohoda) — jedno
+             tlačítko schované na konci poslední sekce nikdo nenašel: kdo vyplní číselnou řadu,
+             nemá u ní co kliknout. Popisek pojmenovává sekci, u které tlačítko stojí, ale všechna
+             volají stejné saveSupplier(), takže se vždy uloží celá stránka (rozdělaná změna
+             v jiném boxu se tedy neztratí). -->
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_supplier') }}
+          </button>
+        </div>
       </section>
 
       <BrandingProfilesSettings v-model:enabled="supplier.branding_profiles_enabled" @changed="load" />
@@ -786,6 +796,11 @@ async function removeSignature() {
           </div>
         </div>
 
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_numbering') }}
+          </button>
+        </div>
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
@@ -969,6 +984,11 @@ async function removeSignature() {
           </div>
         </div>
 
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_tax') }}
+          </button>
+        </div>
       </section>
 
       <!-- Pohoda XML export config (volitelné) — samostatný box -->
@@ -999,7 +1019,7 @@ async function removeSignature() {
 
         <div class="mt-4 flex justify-end">
           <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
-            {{ t('settings.save_supplier') }}
+            {{ t('settings.save_pohoda') }}
           </button>
         </div>
       </section>
