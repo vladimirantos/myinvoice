@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute, RouterLink, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { bankApi, type BankStatementDetail, type BankTransaction, type MatchCandidate, type SplitSuggestion } from '@/api/bank'
@@ -67,6 +67,7 @@ const noticeSummary = computed(() => {
 
 const rematching = ref(false)
 const matchingTx = ref<number | null>(null)
+const matching = ref(false)
 const matchCtx = ref<BankTransaction | null>(null)
 const matchVarsymbol = ref<string>('')
 const matchError = ref<string>('')
@@ -95,8 +96,8 @@ const creatingPi = ref(false)
 const vendorPickerRef = ref<InstanceType<typeof VendorPicker> | null>(null)
 
 useHotkey('escape', () => {
-  if (matchingTx.value !== null) matchingTx.value = null
-  if (createTx.value !== null && !vendorModalOpen.value) createTx.value = null
+  if (matchingTx.value !== null) closeMatch()
+  if (createTx.value !== null && !vendorModalOpen.value) closeCreate()
 })
 
 function openCreate(tx: BankTransaction) {
@@ -113,6 +114,7 @@ async function submitCreatePurchase() {
   creatingPi.value = true
   try {
     const r = await bankApi.createPurchaseInvoice(createTx.value.id, createVendorId.value)
+    detailReturnTarget.value = null
     createTx.value = null
     router.push(`/purchase-invoices/${r.purchase_invoice_id}`)
   } catch (e) {
@@ -275,43 +277,87 @@ function onAnchorSelect(id: number | null) {
 }
 
 async function confirmSuggestion(s: SplitSuggestion) {
-  if (!matchingTx.value) return
+  if (!matchingTx.value || matching.value) return
+  matching.value = true
   matchError.value = ''
   try {
     await bankApi.matchMultiple(matchingTx.value, s.invoices.map(i => i.id))
+    detailReturnTarget.value = null
     matchingTx.value = null
     await load()
   } catch (e: any) {
     matchError.value = apiErrorMessage(e, t('bank.match_failed'))
+  } finally {
+    matching.value = false
   }
 }
 
 async function confirmCandidate(c: MatchCandidate) {
-  if (!matchingTx.value) return
+  if (!matchingTx.value || matching.value) return
+  matching.value = true
   matchError.value = ''
   try {
     await bankApi.matchManual(matchingTx.value,
       c.type === 'invoice' ? { invoiceId: c.id } : { purchaseInvoiceId: c.id })
+    detailReturnTarget.value = null
     matchingTx.value = null
     await load()
   } catch (e: any) {
     matchError.value = apiErrorMessage(e, t('bank.match_failed'))
+  } finally {
+    matching.value = false
   }
 }
 
 async function confirmMatch() {
-  if (!matchingTx.value || !matchVarsymbol.value.trim()) return
+  if (!matchingTx.value || !matchVarsymbol.value.trim() || matching.value) return
+  matching.value = true
   matchError.value = ''
   try {
     await bankApi.matchManual(matchingTx.value, { varsymbol: matchVarsymbol.value.trim() })
+    detailReturnTarget.value = null
     matchingTx.value = null
     await load()
   } catch (e: any) {
     matchError.value = apiErrorMessage(e, t('bank.match_failed'))
+  } finally {
+    matching.value = false
   }
 }
 
 const textDetail = ref<BankTransaction | null>(null)
+const detailReturnTarget = ref<BankTransaction | null>(null)
+
+async function restoreDetail() {
+  const tx = detailReturnTarget.value
+  detailReturnTarget.value = null
+  if (!tx) return
+  await nextTick()
+  textDetail.value = tx
+}
+
+function closeMatch() {
+  if (matching.value || matchingTx.value === null) return
+  matchingTx.value = null
+  void restoreDetail()
+}
+
+function closeCreate() {
+  if (creatingPi.value || vendorModalOpen.value || createTx.value === null) return
+  createTx.value = null
+  void restoreDetail()
+}
+
+async function runDetailAction(action: (tx: BankTransaction) => void) {
+  const tx = textDetail.value
+  if (!tx || !auth.canWrite) return
+  detailReturnTarget.value = tx
+  textDetail.value = null
+  // Nejdřív odmontuj detail, aby jeho cleanup neodemkl scroll nového dialogu.
+  await nextTick()
+  action(tx)
+}
+
 const transactionDetailFields = computed(() => {
   const tx = textDetail.value
   if (!tx) return []
@@ -339,7 +385,9 @@ function ignoreTx(tx: BankTransaction) {
 }
 
 function closeIgnore() {
-  if (!ignoring.value) ignoreTarget.value = null
+  if (ignoring.value || !ignoreTarget.value) return
+  ignoreTarget.value = null
+  void restoreDetail()
 }
 
 async function confirmIgnore() {
@@ -351,6 +399,7 @@ async function confirmIgnore() {
     const result = await bankApi.ignore(tx.id, ignoreNote.value.trim() || null)
     tx.match_status = 'ignored'
     tx.ignore_note = result.ignore_note
+    detailReturnTarget.value = null
     ignoreTarget.value = null
   } catch (e) {
     ignoreError.value = apiErrorMessage(e, t('bank.ignore_failed'))
@@ -369,7 +418,9 @@ function unmatchTx(tx: BankTransaction) {
 }
 
 function closeUnmatch() {
-  if (!unmatching.value) unmatchTarget.value = null
+  if (unmatching.value || !unmatchTarget.value) return
+  unmatchTarget.value = null
+  void restoreDetail()
 }
 
 async function confirmUnmatch() {
@@ -387,6 +438,7 @@ async function confirmUnmatch() {
       matched_varsymbol: null, matched_invoice_amount: null, matched_client_name: null,
       matched_purchase_ref: null, matched_vendor_name: null, matched_invoices: [], matched_at: null,
     })
+    detailReturnTarget.value = null
     unmatchTarget.value = null
   } catch (e) {
     unmatchError.value = apiErrorMessage(e, t('bank.unmatch_failed'))
@@ -772,8 +824,31 @@ async function rematchStatement() {
         </div>
       </dl>
       <template #footer>
-        <button type="button" @click="textDetail = null"
-          class="cursor-pointer px-3 py-2 text-sm rounded-md border border-neutral-300">{{ t('common.close') }}</button>
+        <div class="flex flex-wrap justify-end gap-2 w-full">
+          <template v-if="auth.canWrite">
+            <button v-if="textDetail.amount < 0 && textDetail.match_status === 'unmatched'" type="button"
+              @click="runDetailAction(openCreate)"
+              class="cursor-pointer px-3 py-2 text-sm rounded-md border border-primary-500/40 text-primary-700 hover:bg-primary-50">
+              {{ t('bank.create_purchase') }}
+            </button>
+            <button v-if="textDetail.match_status === 'unmatched' || textDetail.match_status === 'auto_partial'" type="button"
+              @click="runDetailAction(startMatch)"
+              class="cursor-pointer px-3 py-2 text-sm rounded-md border border-primary-500/40 text-primary-700 hover:bg-primary-50">
+              {{ t('bank.match') }}
+            </button>
+            <button v-if="textDetail.match_status === 'unmatched'" type="button" @click="runDetailAction(ignoreTx)"
+              class="cursor-pointer px-3 py-2 text-sm rounded-md border border-neutral-300 text-neutral-600 hover:bg-neutral-50">
+              {{ t('bank.ignore') }}
+            </button>
+            <button v-if="['auto_exact', 'auto_partial', 'manual', 'ignored'].includes(textDetail.match_status)" type="button"
+              @click="runDetailAction(unmatchTx)"
+              class="cursor-pointer px-3 py-2 text-sm rounded-md border border-neutral-300 text-neutral-600 hover:bg-danger-50 hover:text-danger-600">
+              {{ t(textDetail.match_status === 'ignored' ? 'bank.unignore' : 'bank.unmatch') }}
+            </button>
+          </template>
+          <button type="button" @click="textDetail = null"
+            class="cursor-pointer px-3 py-2 text-sm rounded-md border border-neutral-300">{{ t('common.close') }}</button>
+        </div>
       </template>
     </Modal>
 
@@ -950,7 +1025,7 @@ async function rematchStatement() {
           {{ matchError }}
         </div>
         <div class="flex justify-end">
-          <button @click="matchingTx = null" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+          <button @click="closeMatch" :disabled="matching" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
         </div>
       </div>
     </div>
@@ -967,7 +1042,7 @@ async function rematchStatement() {
         <VendorPicker ref="vendorPickerRef" v-model="createVendorId" :on-create-new="() => { vendorModalOpen = true }" />
         <p class="text-xs text-neutral-500 mt-2 mb-4">{{ t('bank.create_purchase_hint') }}</p>
         <div class="flex justify-end gap-2">
-          <button @click="createTx = null" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
+          <button @click="closeCreate" :disabled="creatingPi" class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md hover:bg-neutral-50">{{ t('common.cancel') }}</button>
           <button @click="submitCreatePurchase" :disabled="!createVendorId || creatingPi"
             class="cursor-pointer px-4 h-9 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
             {{ creatingPi ? '…' : t('bank.create_purchase_submit') }}

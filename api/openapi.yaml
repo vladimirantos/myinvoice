@@ -2623,10 +2623,13 @@ paths:
       - $ref: '#/components/parameters/SupplierIdHeader'
     post:
       tags: [Bank]
-      summary: Nahraje bankovní výpis (GPC/CSV/ABO)
+      summary: Nahraje bankovní výpis (GPC/ABO)
       description: |
-        Multipart upload. Server detekuje formát z obsahu a parsuje transakce.
-        Auto-matching proti otevřeným fakturám se spustí po `POST /scan`.
+        Multipart upload GPC/ABO. Server parsuje transakce a spouští automatické párování.
+        Před uložením může vrátit `409 ignored_notices_confirmation` s návrhy převzetí
+        ručního ignorování z e-mailových avíz. Opakujte upload stejného souboru a účtu
+        s `ignore_decision`. Při změně avíz se vrátí nový náhled k potvrzení.
+        Bezobslužný klient může poslat `{"skip":true}` pro import bez přenosu.
 
         GPC/ABO hlavička neobsahuje měnu. Pokud jedno číslo účtu evidujete ve více
         měnách (např. Raiffeisenbank: CZK/EUR/USD = jedno číslo), je nutné zvolit
@@ -2645,18 +2648,25 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: GPC, CSV (FIO/KB/MB formáty) nebo ABO výpis
+                  description: GPC nebo ABO výpis
                 account_id:
                   type: integer
                   description: |
                     Cílový měnový účet (`currencies.id`). Povinné jen u víceměnového účtu
                     se sdíleným číslem účtu (jinak server vrátí 409 `ambiguous_account_currency`).
+                ignore_decision:
+                  type: string
+                  description: |
+                    JSON řetězec odpovídající IgnoreNoticeDecision. Pro potvrzení
+                    obsahuje fingerprint náhledu a selected (indexy vybraných dvojic).
+                    Pro import bez přenosu obsahuje {"skip":true}.
+                  example: '{"skip":true}'
       responses:
-        '201':
+        '200':
           description: Naparsováno
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/BankStatement' }
+              schema: { $ref: '#/components/schemas/BankStatementImportResult' }
         '400':
           description: Neznámý formát / poškozený soubor
           content:
@@ -2666,12 +2676,64 @@ paths:
           description: |
             Číslo účtu není registrované u dodavatele (`wrong_supplier_account`),
             nebo má více měnových variant a chybí `account_id` (`ambiguous_account_currency`
-            — `error.candidates` nese seznam `{account_id, code, label}`).
+            — `error.candidates` nese seznam `{account_id, code, label}`),
+            nebo je třeba potvrdit ignorování (`ignored_notices_confirmation`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/IgnoreNoticeConfirmation'
+        '422':
+          description: Zvolený `account_id` neodpovídá číslu účtu výpisu / dodavateli (`invalid_account`)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /api/v1/bank-statements/upload-pdf:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+    post:
+      tags: [Bank]
+      summary: Nahraje bankovní PDF výpis
+      description: |
+        Bankovní parser převede PDF na transakce. Výběr účtu i potvrzení přenosu
+        ignorování z avíz fungují stejně jako u GPC uploadu. Pro import bez
+        přenosu pošlete ignore_decision jako JSON řetězec {"skip":true}.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                account_id: { type: integer }
+                ignore_decision:
+                  type: string
+                  description: JSON řetězec podle schématu IgnoreNoticeDecision.
+      responses:
+        '200':
+          description: Výpis importován nebo nalezena duplicita.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankStatementImportResult' }
+        '400':
+          description: Neplatný PDF výpis nebo potvrzení.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Nutný výběr účtu nebo potvrzení převzetí ignorování.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/IgnoreNoticeConfirmation'
         '422':
-          description: Zvolený `account_id` neodpovídá číslu účtu výpisu / dodavateli (`invalid_account`)
+          description: Zvolený účet nepatří aktuálnímu dodavateli nebo neodpovídá výpisu.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -6895,6 +6957,58 @@ components:
         bcc: { type: array, items: { type: string } }
         resolved: { type: object }
 
+    BankStatementImportResult:
+      type: object
+      required: [statement_id, transactions, matched, duplicate]
+      properties:
+        statement_id: { type: integer }
+        transactions: { type: integer }
+        matched: { type: integer }
+        duplicate: { type: boolean }
+        ignored_transferred: { type: integer, description: "Počet potvrzeně převzatých ignorování; není součástí matched." }
+    IgnoreNoticeDecision:
+      oneOf:
+        - type: object
+          required: [skip]
+          properties:
+            skip: { type: boolean, const: true }
+        - type: object
+          required: [fingerprint, selected]
+          properties:
+            fingerprint: { type: string }
+            selected:
+              type: array
+              uniqueItems: true
+              items: { type: integer, minimum: 0 }
+    IgnoreNoticeConfirmation:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, fingerprint, candidates]
+          properties:
+            code: { type: string, const: ignored_notices_confirmation }
+            message: { type: string }
+            fingerprint: { type: string }
+            candidates:
+              type: array
+              items: { $ref: '#/components/schemas/IgnoreNoticeCandidate' }
+    IgnoreNoticeCandidate:
+      type: object
+      properties:
+        index: { type: integer, description: "Index řádku v importovaném výpisu." }
+        notice_id: { type: integer }
+        posted_at: { type: string, format: date }
+        notice_date: { type: string, format: date }
+        amount: { type: number }
+        currency: { type: string }
+        variable_symbol: { type: [string, "null"] }
+        counterparty: { type: [string, "null"] }
+        counterparty_account: { type: string }
+        reason: { type: string, enum: [variable_symbol, counterparty_account] }
+        ignore_note: { type: [string, "null"], maxLength: 1000 }
+
     BankStatement:
       type: object
       description: "Položka seznamu výpisů (GET /bank-statements). Bankovní spojení dodavatele je per-měna na /settings/currencies, ne tady."
@@ -6949,6 +7063,7 @@ components:
         description: { type: [string, "null"] }
         bank_ref: { type: [string, "null"], description: "Bankovní referenční ID transakce" }
         ignore_note: { type: [string, "null"], maxLength: 1000, description: "Uživatelská poznámka k ignorování transakce." }
+        ignore_origin: { type: [string, "null"], description: "Původ ignorování: manual = ruční, notice_transfer = převzaté z avíza, null = starší nebo neurčený původ." }
         match_status:
           type: string
           enum: [unmatched, auto_exact, auto_partial, manual, ignored]

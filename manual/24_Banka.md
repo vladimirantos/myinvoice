@@ -102,6 +102,14 @@ zůstatek, pokud je banka poskytla. Nechybí odkazy na spárované faktury, cel�
 popis z banky a případná poznámka k ignorování. Detail lze otevřít i u pohybu
 bez popisu. Funguje také na mobilu; delší text se zalamuje.
 
+Přímo v detailu jsou podle stavu transakce dostupné akce **Vytvořit fakturu**
+(pro nespárovanou odchozí platbu), **Spárovat**, **Ignorovat**, **Zrušit spárování**
+a **Zrušit ignorování**. Akce otevře příslušný formulář nebo potvrzovací dialog
+pro právě prohlíženou transakci. Zrušení nebo zavření této akce bez dokončení
+vrátí původní detail transakce. Po úspěšném dokončení se detail znovu neotevírá.
+Dostupnost odpovídá akcím v seznamu; uživatel
+bez oprávnění k zápisu vidí pouze údaje a odkazy na doklady.
+
 Odchozí platby se u přijatých faktur párují podle **platebního variabilního
 symbolu**, interního čísla nebo čísla dokladu dodavatele. Při porovnání se
 zohledňují také úvodní nuly a oddělovače v číslech dokladů. Očekávaná částka
@@ -170,6 +178,26 @@ a součet musí **odpovídat částce platby** (sloučená úhrada = uhradit vš
 faktury celé; není to rozpouštění jedné platby na částečné úhrady). Zrušení
 spárování (§ 24.5) smaže **všechny** platby té transakce a vrátí všechny faktury
 zpět mezi pohledávky. Activity log: `bank.tx_manual_match_split`.
+
+### Přenos ignorování z e-mailových avíz
+
+Při ručním importu GPC/ABO nebo PDF výpisu aplikace před párováním nabídne
+převzetí ignorování ze shodných ručně ignorovaných avíz. Pomocí **Vybrat vše** lze označit všechny nabídnuté shody nebo jejich výběr zrušit. Vyber konkrétní
+pohyby a potvrď **Přenést vybrané a importovat**. Přenese se i poznámka;
+částky a zůstatky výpisu se nemění. Avízo zůstane ignorované.
+
+**Importovat bez přenosu** pokračuje běžným párováním. **Zrušit** nebo zavření
+dialogu soubor neimportuje. Pokud se avízo mezitím změní, výběr je potřeba
+znovu potvrdit. Souhrn oznámí počet převzatých ignorování samostatně od párování.
+
+Nabízejí se jen jednoznačné dvojice stejné firmy, účtu, banky, měny a částky
+včetně znaménka, s datem nejvýše o pět dní odlišným. Identitu musí podpořit
+shodný VS nebo protiúčet. Karetní platby bez obou údajů, nejednoznačné dvojice,
+systémově ignorovaná avíza a avíza s vazbou na úhradu se nepřenášejí.
+U starších ignorování musí být ruční rozhodnutí doloženo auditním záznamem.
+
+Jedno avízo se použije nejvýše jednou, i když později zrušíš ignorování nebo
+smažeš importovaný výpis. Automatické skenování adresáře ignorování nepřenáší.
 
 ### 24.4.3 Ignorovat transakci
 
