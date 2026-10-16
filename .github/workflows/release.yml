@@ -116,6 +116,12 @@ jobs:
             if [ "$CURL_RC" = "0" ] && [ "$STATUS" = "0" ]; then
               echo "✓ Pull endpoint OK (pokus $i)"; printf '%s' "$RESPONSE" | jq -r '.stdout // empty' 2>/dev/null; ok=1; break
             fi
+            # Rosti webhook nově odpovídá asynchronně {"status":"running"} = pull+up přijat
+            # a běží na pozadí. Každé další zavolání by ho spustilo znovu → bereme jako úspěch
+            # a nevoláme opakovaně. Výsledek ověř přes /api/health instance.
+            if [ "$CURL_RC" = "0" ] && [ "$STATUS" = "running" ]; then
+              echo "✓ Pull endpoint přijal deploy, běží asynchronně na Rosti (pokus $i)"; ok=1; break
+            fi
             echo "::warning::pokus $i neúspěšný (curl_rc=$CURL_RC, status='${STATUS:-<ne-JSON>}')."
             printf '%s' "$RESPONSE" | head -c 800; echo
             [ "$i" -lt "$attempts" ] && { echo "Čekám ${delay}s…"; sleep "$delay"; }
