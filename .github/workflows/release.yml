@@ -31,6 +31,11 @@ jobs:
       SPOTTED_SSH_KEY: ${{ secrets.SPOTTED_SSH_KEY }}
       SPOTTED_SSH_HOST: ssh.rosti.cz
       SPOTTED_SSH_PORT: "29019"
+      # Stack 3 (testinvoice, id 844, Spotted s.r.o.) — testovací instance, deploy přes SSH
+      # jako spotted, ale z vlastního tagu :test. Prázdný klíč nebo port = deploy se přeskočí.
+      TESTINVOICE_SSH_KEY: ${{ secrets.TESTINVOICE_SSH_KEY }}
+      TESTINVOICE_SSH_HOST: ssh.rosti.cz
+      TESTINVOICE_SSH_PORT: ${{ vars.TESTINVOICE_SSH_PORT }}
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +75,10 @@ jobs:
       - name: Tag latest
         run: docker tag $IMAGE:${{ env.TAG_NAME }} $IMAGE:latest
 
+      # Tag :test — z něj tahá testovací stack (testinvoice, 844)
+      - name: Tag test
+        run: docker tag $IMAGE:${{ env.TAG_NAME }} $IMAGE:test
+
       # Push versioned tag
       - name: Push
         run: docker push $IMAGE:${{ env.TAG_NAME }}
@@ -77,6 +86,10 @@ jobs:
       # Push latest tag
       - name: Push latest
         run: docker push $IMAGE:latest
+
+      # Push test tag
+      - name: Push test
+        run: docker push $IMAGE:test
 
       # Tell Rosti to pull the new image and restart the stack.
       #
@@ -130,3 +143,21 @@ jobs:
             "root@$SPOTTED_SSH_HOST" \
             "bash -c 'cd /srv/stack && docker compose pull && docker compose up -d'"
           echo "✓ Spotted deploy přes SSH OK"
+
+      # Stack 3 (testinvoice, 844) — stejný SSH postup jako spotted, compose na stacku
+      # tahá ghcr.io/vladimirantos/myinvoice:test. always() → test nesmí blokovat
+      # selhání produkčních stacků (ani naopak — je to poslední krok).
+      - name: Deploy stack 3 (testinvoice) — SSH
+        if: ${{ always() && env.TESTINVOICE_SSH_KEY != '' && env.TESTINVOICE_SSH_PORT != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          # Klíč je v secretu base64 (jednořádkový), stejně jako SPOTTED_SSH_KEY.
+          printf '%s' "$TESTINVOICE_SSH_KEY" | base64 -d > ~/.ssh/testinvoice_deploy
+          chmod 600 ~/.ssh/testinvoice_deploy
+          ssh -i ~/.ssh/testinvoice_deploy -p "$TESTINVOICE_SSH_PORT" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
+            "root@$TESTINVOICE_SSH_HOST" \
+            "bash -c 'cd /srv/stack && docker compose pull && docker compose up -d'"
+          echo "✓ Testinvoice deploy přes SSH OK"
