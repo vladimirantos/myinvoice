@@ -3,7 +3,7 @@
 Soupis VŠECH odchylek našeho forku od upstreamu. Slouží jako vodítko při mergi nové
 upstream verze. **Aktualizuj při každé další fork změně.**
 
-Base: poslední mergnutá upstream verze = **v4.58.0** (merge 2026-09-22; předtím v4.53.2, v4.49.2, v4.44.1, v4.43.3, v4.42.0, v4.33.0, v4.6.0).
+Base: poslední mergnutá upstream verze = **v4.59.2** (merge 2026-10-16; předtím v4.58.0, v4.53.2, v4.49.2, v4.44.1, v4.43.3, v4.42.0, v4.33.0, v4.6.0).
 Aktuální fork rozsah: `git log upstream/master..master` (po fetchi upstreamu).
 
 ## ⚠️ Hlavní pravidlo při mergi
@@ -347,5 +347,23 @@ neumí importovat `.ts` bez strip-types + vite dev server v testu), tedy prostř
 
 **Nasazení:** rovnou do `master` bez PR (na výslovné přání), `release.yml` nasadí oba stacky.
 
+
+## Merge upstream v4.59.2 (2026-10-16)
+Upstream v4.59.0–v4.59.2: přenos ignorování z e-mailových avíz do bankovního výpisu
+(migrace `0153_bank_notice_ignore_transfer.sql`), akce v detailu bankovní transakce, texty
+MyÚčto, ISDOC import zachovává zaokrouhlení, výzva k upomínkám dle `OverduePolicy`, PDF
+záloha s originály, RB parser vklad+poplatek. **Bez konfliktů.**
+
+**Migrace `0153_notes.sql` → `0154_notes.sql`** (`git mv`; upstream max je `0153`).
+Idempotentní → re-run bezpečný.
+
+**Fork části beze změny:** PDF šablony/CSS, `InvoicePdfRenderer`, `release.yml`,
+`docker-entrypoint.sh`, `.gitignore` upstream nesáhl. Auto-merge `AppLayout.vue`, i18n
+(Poznámky) a `Update.vue` (import `utils/markdown`) přežil.
+
+**Ověřeno lokálně:** `php -l` na změněných PHP ✓, `pnpm build` ✓. PHPUnit jen v CI.
+
+**Nasazení:** rovnou do `master` (na výslovné přání) spolu s deployem stacku 3 (testinvoice).
+
 ---
-_Naposledy aktualizováno: 2026-09-22 (merge upstream v4.58.0)._
+_Naposledy aktualizováno: 2026-10-16 (merge upstream v4.59.2)._

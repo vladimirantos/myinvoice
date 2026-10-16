@@ -3,10 +3,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 
 // Execute the page's setup with API/lifecycle doubles, retaining Vue reactivity.
-function setup(ignore, unmatch) {
+function setup(ignore, unmatch, canWrite = true) {
   const source = readFileSync(new URL('../src/pages/bank/StatementDetail.vue', import.meta.url), 'utf8')
     .split('<script setup lang="ts">')[1].split('</script>')[0]
   const script = ts.transpileModule(source, {
@@ -15,13 +15,13 @@ function setup(ignore, unmatch) {
       return ts.isImportDeclaration(n) ? undefined : ts.visitEachChild(n, visit, context)
     })] },
   }).outputText.replace(/export \{\};?/, '')
-  return runInNewContext(`${script}\n({ statement, statusFilter, filteredTransactions, loading, ignoreTx, closeIgnore, confirmIgnore, ignoreTarget, ignoreNote, ignoreError, ignoring, unmatchTx, closeUnmatch, confirmUnmatch, unmatchTarget, unmatchError, unmatching })`, {
-    ref, computed, onMounted() {}, useHotkey() {},
+  return runInNewContext(`${script}\n({ textDetail, runDetailAction, openCreate, createTx, startMatch, matchCtx, matchingTx, matching, closeMatch, closeCreate, creatingPi, detailReturnTarget, statement, statusFilter, filteredTransactions, loading, ignoreTx, closeIgnore, confirmIgnore, ignoreTarget, ignoreNote, ignoreError, ignoring, unmatchTx, closeUnmatch, confirmUnmatch, unmatchTarget, unmatchError, unmatching })`, {
+    ref, computed, nextTick, onMounted() {}, useHotkey() {},
     useRoute: () => ({ params: { id: 1 } }), useRouter: () => ({}),
-    useAuthStore: () => ({ canWrite: true }), useToast: () => ({}),
+    useAuthStore: () => ({ canWrite }), useToast: () => ({}),
     useI18n: () => ({ t: key => key, locale: ref('cs') }),
     apiErrorMessage: e => e.message,
-    bankApi: { ignore, unmatch, get() { throw new Error('Unexpected page reload') } },
+    bankApi: { ignore, unmatch, matchCandidates: async () => ({ candidates: [], fallback: false }), get() { throw new Error('Unexpected page reload') } },
   })
 }
 
@@ -126,4 +126,90 @@ test('returning an ignored transaction keeps matched count and clears ignore not
   assert.equal(tx.match_status, 'unmatched')
   assert.equal(tx.ignore_note, null)
   assert.equal(page.statement.value.matched_count, 3)
+})
+
+
+test('detail actions close the detail before opening the existing dialog for the same transaction', async () => {
+  const page = setup()
+  const tx = seed(page)
+  for (const [action, target] of [[page.openCreate, page.createTx], [page.startMatch, page.matchCtx], [page.ignoreTx, page.ignoreTarget], [page.unmatchTx, page.unmatchTarget]]) {
+    page.textDetail.value = tx
+    let called = false
+    await page.runDetailAction(selected => {
+      assert.equal(page.textDetail.value, null)
+      assert.equal(selected, tx)
+      called = true
+      action(selected)
+    })
+    assert.equal(called, true)
+    assert.equal(target.value, tx)
+    target.value = null
+  }
+})
+
+test('detail action cannot run twice or mutate from a read-only detail', async () => {
+  const page = setup()
+  page.textDetail.value = seed(page)
+  let calls = 0
+  const action = () => { calls++ }
+  await Promise.all([page.runDetailAction(action), page.runDetailAction(action)])
+  assert.equal(calls, 1)
+  const readOnly = setup(null, null, false)
+  readOnly.textDetail.value = seed(readOnly)
+  await readOnly.runDetailAction(action)
+  assert.equal(calls, 1)
+  assert.notEqual(readOnly.textDetail.value, null)
+})
+
+
+test('cancelling every action opened from detail restores that same detail', async () => {
+  const page = setup()
+  const tx = seed(page)
+  for (const [open, close] of [[page.startMatch, page.closeMatch], [page.openCreate, page.closeCreate], [page.ignoreTx, page.closeIgnore], [page.unmatchTx, page.closeUnmatch]]) {
+    page.textDetail.value = tx
+    await page.runDetailAction(open)
+    close()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(page.textDetail.value, tx)
+    assert.equal(page.detailReturnTarget.value, null)
+    page.textDetail.value = null
+    open(tx)
+    close()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(page.textDetail.value, null)
+  }
+})
+
+test('successful ignore or unmatch consumes return target; cancelling a later row action does not reopen it', async () => {
+  const page = setup(async () => ({ ignore_note: null }), async () => {})
+  const tx = seed(page)
+  for (const [open, confirm, close] of [[page.ignoreTx, page.confirmIgnore, page.closeIgnore], [page.unmatchTx, page.confirmUnmatch, page.closeUnmatch]]) {
+    page.textDetail.value = tx
+    await page.runDetailAction(open)
+    await confirm()
+    assert.equal(page.textDetail.value, null)
+    assert.equal(page.detailReturnTarget.value, null)
+    open(tx)
+    close()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(page.textDetail.value, null)
+  }
+})
+
+test('pending match and invoice creation cannot cancel back to detail', async () => {
+  const page = setup()
+  const tx = seed(page)
+  for (const [open, close, busy] of [[page.startMatch, page.closeMatch, page.matching], [page.openCreate, page.closeCreate, page.creatingPi]]) {
+    page.textDetail.value = tx
+    await page.runDetailAction(open)
+    busy.value = true
+    close()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(page.textDetail.value, null)
+    assert.equal(page.detailReturnTarget.value, tx)
+    busy.value = false
+    close()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(page.textDetail.value, tx)
+  }
 })

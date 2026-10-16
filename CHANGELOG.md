@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.59.2] - 2026-10-15
+
+### Fixed
+
+- **PDF výpis Raiffeisenbank s vkladem hotovosti a poplatkem na jednom řádku.** Vklad hotovosti na pobočce tiskne RB na jeden řádek se sloupcem Poplatek. Parser bral jen poslední částku, poplatek zahodil a kontrola součtů pak odmítla celý výpis. Nově vznikne vklad v plné výši a samostatný pohyb poplatku, takže součty sedí na zůstatek výpisu.
+
+## [4.59.1] - 2026-10-14
+
+### Fixed
+
+- **Import vydaných faktur z ISDOC zachovává zaokrouhlení.** Import zahazoval `PayableRoundingAmount`, takže částka k úhradě zůstala haléřová a zaokrouhlená úhrada klienta vyšla jako nedoplatek. Zaokrouhlení se nově převezme do `invoices.rounding` přímo z `PayableRoundingAmount`, a když chybí, z rozdílu nenulového `PayableAmount` proti položkám (jen u dokladu bez odečtených záloh). Do DPH ani položek nevstupuje. (#289, díky @janvalentik)
+- **Výzva „Pošli upomínky“ se shoduje se seznamem faktur po splatnosti.** Výzva na dashboardu započítávala i faktury splatné dnes, zatímco seznam je ve výchozím nastavení ukazuje až následující den. Nově používá stejnou hranici splatnosti (`OverduePolicy`) jako seznam, včetně volitelného zahrnutí dnešní splatnosti. (#287, díky @blondak)
+- **PDF záloha obsahuje originály a přílohy faktur.** `cron-backup-pdf` dřív bral jen soubory `.pdf` a vynechával strojové originály přijatých faktur (ISDOC, ISDOCX, XML, JSON), přílohy vystavených faktur jiných typů i převzatá PDF z `invoices-imported`. Archiv `*-pdf-*.zip` je nově obsahuje a používá pevné cesty `storage/...` i při externím úložišti nebo nastaveném `MYINVOICE_DATA_DIR`. Soubory mimo zdrojový adresář (symlinky) se přeskočí. (#288, díky @blondak)
+
+### Documentation
+
+- Manuál popisuje obsah záloh a doporučené časy `cron-backup-pdf` a `cron-backup-documents`, a hranici splatnosti u výzvy k upomínkám.
+
+## [4.59.0] - 2026-10-02
+
+### Added
+
+- **Přenos ignorování z e-mailových avíz do bankovního výpisu.** Při ručním importu GPC/ABO nebo PDF výpisu aplikace nabídne převzetí ignorování a poznámky z odpovídajících ručně ignorovaných e-mailových avíz. Uživatel vybere jednotlivé pohyby nebo použije „Vybrat vše“, případně import dokončí bez přenosu nebo zruší bez uložení výpisu. Nabízí se jen jednoznačné shody podle účtu, měny, částky včetně znaménka, data a VS nebo protiúčtu. Automaticky ignorovaná avíza a avíza navázaná na platby se vyřazují a jedno avízo lze použít nejvýše jednou. Automatické skenování adresáře zůstává bez přenosu. Migrace 0153 přidává `bank_transactions.ignore_origin` a auditní tabulku `bank_notice_ignore_transfers`, OpenAPI je aktualizované. (#285, díky @blondak)
+- **Akce v detailu bankovní transakce.** Detail pohybu nově nabízí podle stavu a oprávnění akce Vytvořit fakturu (nespárovaná odchozí platba), Spárovat, Ignorovat, Zrušit spárování a Zrušit ignorování. Zrušení akce vrátí původní detail, po dokončení se detail znovu neotevírá. (#284, díky @blondak)
+
+### Changed
+
+- **Texty o přechodu na MyÚčto.** Stránka přechodu, modal podpory, stránka Aktualizace a tip na dashboardu už neslibují, že vše zdarma v MyInvoice je zdarma i v MyÚčtu. Seznam placených doplňků je sjednocený: daňová evidence a účetnictví, mzdy a personalistika, sklady a e-shop, více účtovaných firem.
+
 ## [4.58.0] - 2026-09-21
 
 ### Added
